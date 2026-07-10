@@ -1,0 +1,128 @@
+version: "3.8"
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=production
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - RABBITMQ_HOST=rabbitmq
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=minio:9000
+    env_file:
+      - .env
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./uploads:/app/uploads
+      - ./reports:/app/reports
+    restart: unless-stopped
+    networks:
+      - securecode-network
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      - APP_ENV=production
+      - DB_HOST=mysql
+      - RABBITMQ_HOST=rabbitmq
+    env_file:
+      - .env
+    depends_on:
+      - api
+      - rabbitmq
+    restart: unless-stopped
+    networks:
+      - securecode-network
+
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: securecode_db
+      MYSQL_USER: securecode
+      MYSQL_PASSWORD: securecode_pass
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - securecode-network
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - securecode-network
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - securecode-network
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    networks:
+      - securecode-network
+
+  sonarqube:
+    image: sonarqube:community
+    ports:
+      - "9002:9000"
+    environment:
+      - SONAR_JDBC_URL=jdbc:mysql://mysql:3306/sonar?useUnicode=true&characterEncoding=utf8
+      - SONAR_JDBC_USERNAME=securecode
+      - SONAR_JDBC_PASSWORD=securecode_pass
+    depends_on:
+      - mysql
+    networks:
+      - securecode-network
+
+volumes:
+  mysql_data:
+  rabbitmq_data:
+  redis_data:
+  minio_data:
+
+networks:
+  securecode-network:
+    driver: bridge

@@ -1,0 +1,75 @@
+feign:
+  client:
+    config:
+      default:
+        connectTimeout: 30000
+        readTimeout: 30000
+        loggerLevel: full
+
+
+unifier:
+  url_rest: https://us2.unifier.oraclecloud.com/alhel/ws/rest
+  name: unifier-service
+  get_data: /service/v1/bp/records/
+  get_udr: /service/v1/data/udr/get
+  get_event: /service/v1/event/notification
+  login_u: unifier-login-service
+  login: /service/v1/login
+  create_data: /service/v1/bp/record
+  create_data_att: /service/v2/bp/record/file
+  username: $$excel
+  password: $$excel
+  interlock: JCRleGNlbDokJGV4Y2Vs
+
+
+
+service:
+  create_folder_unifier: http://wsprd.perulng.com:8122/OTCSFacade/rest/Folder/Create
+  upload_document_unifier: http://wsprd.perulng.com:8122/OTCSFacade/rest/Document/
+  unifier_url_rest: https://unifier.oraclecloud.com/perulng/ws/rest
+  udr_end_point: /service/v1/data/udr/get/
+  get_data: /service/v1/bp/record/file/
+  get_data2: /service/v1/bp/records/
+  update_endpoint: /service/v1/bp/record/
+  name_project: PI-0001
+  project: PI-0001?input=
+  get_all_folder: http://wsprd.perulng.com:8122/OTCSFacade/rest/Folder/List
+
+  login:
+    name: login-service
+  get_folder:
+    name: folder-service
+    open_text_id: 5277048
+
+
+
+
+
+
+
+server:
+  port: 9002
+
+
+
+
+logging:
+  file:
+    name: /logs/codelco/java/codelcoRun/codelco-csv.log
+
+
+app:
+  file:
+    path: "C:\Users\Administrator\Documents\metadata_dev\2026.03.28 Data Subir a Bd\A20M401-Aconexfinal Externos.xlsx"
+
+spring:
+  datasource:
+    url: "jdbc:mysql://localhost:3306/metadata_dev?useSSL=false&serverTimezone=UTC"
+    username: "root"
+    password: "MyCodelco.2024"
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: true

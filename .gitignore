@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+uploads/
+reports/
+*.db
+
+# Docker
+.docker/
+
+# Logs
+*.log
+logs/
+
+# Alembic
+migrations/versions/*.pyc
+
+# Test
+.coverage
+htmlcov/
+.pytest_cache/
+
+# MinIO data
+minio-data/

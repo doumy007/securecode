@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: securecode-service
+  namespace: securecode
+spec:
+  selector:
+    app: securecode
+    component: api
+  ports:
+  - port: 80
+    targetPort: 8000
+  type: LoadBalancer
