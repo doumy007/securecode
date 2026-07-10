@@ -1,9 +1,10 @@
 const API = window.location.origin;
 let TOKEN = localStorage.getItem("sc_token") || null;
 let USER = null;
+let _pollInterval = null;
 
 function setToken(t) { TOKEN = t; localStorage.setItem("sc_token", t); }
-function logout() { TOKEN = null; USER = null; localStorage.removeItem("sc_token"); showPage("login"); }
+function logout() { TOKEN = null; USER = null; localStorage.removeItem("sc_token"); stopPolling(); showPage("login"); }
 
 async function api(method, path, body) {
   const opts = { method, headers: { "Content-Type": "application/json" } };
@@ -27,6 +28,7 @@ function hashRoute() {
 window.addEventListener("hashchange", hashRoute);
 
 function showPage(name) {
+  stopPolling();
   document.getElementById("page-login").classList.add("d-none");
   document.getElementById("page-layout").classList.add("d-none");
   document.getElementById("loading-screen").classList.remove("d-none");
@@ -49,6 +51,10 @@ function loadPage(name) {
   else if (name === "projects") renderProjects(ct);
   else if (name === "audits") renderAudits(ct);
   else if (name === "profile") renderProfile(ct);
+}
+
+function stopPolling() {
+  if (_pollInterval) { clearInterval(_pollInterval); _pollInterval = null; }
 }
 
 // ---------- LOGIN ----------
@@ -206,6 +212,15 @@ async function showProjectDetail(projectId) {
   try {
     const stats = await api("GET", `/projects/${projectId}/stats`);
     const files = await api("GET", `/projects/${projectId}/files`);
+    let frameworks = [];
+    try { frameworks = await api("GET", "/audits/frameworks"); } catch {}
+    const defaultFws = [{id:"owasp",label:"OWASP Top 10"},{id:"nist_csf",label:"NIST CSF"},{id:"iso_27001",label:"ISO 27001"},{id:"cis",label:"CIS Controls"},{id:"mitre_attck",label:"MITRE ATT&CK"}];
+    if (!Array.isArray(frameworks) || !frameworks.length) frameworks = defaultFws;
+    let fwHtml = frameworks.map(f => {
+      const id = f.id || f;
+      const label = f.label || f;
+      return `<div class="form-check"><input class="form-check-input fw-check" type="checkbox" value="${id}" id="fw-${id}" checked><label class="form-check-label text-secondary small" for="fw-${id}">${label}</label></div>`;
+    }).join("");
     document.getElementById("detail-body").innerHTML = `
       <div class="row g-2 mb-3">
         <div class="col-4"><div class="card border-secondary text-center p-2"><small class="text-secondary">Archivos</small><b>${stats.total_files}</b></div></div>
@@ -216,18 +231,36 @@ async function showProjectDetail(projectId) {
       ${files.length ? `<ul class="list-group list-group-flush small">${files.map(f => `<li class="list-group-item bg-transparent border-secondary py-1 px-2">${f.ruta} <span class="text-secondary">(${f.lenguaje})</span></li>`).join("")}</ul>`
         : '<p class="text-secondary small">Sin archivos.</p>'}
       <hr>
-      <div class="d-flex gap-2 align-items-end">
-        <div class="flex-grow-1">
-          <p class="small text-secondary mb-1">Subir ZIP</p>
+      <div class="mb-2">
+        <div class="btn-group btn-group-sm w-100 mb-2" role="group">
+          <input type="radio" class="btn-check" name="upload-mode" id="mode-zip" value="zip" checked onchange="toggleUploadMode()">
+          <label class="btn btn-outline-secondary" for="mode-zip"><i class="bi bi-file-zip me-1"></i>ZIP</label>
+          <input type="radio" class="btn-check" name="upload-mode" id="mode-git" value="git" onchange="toggleUploadMode()">
+          <label class="btn btn-outline-secondary" for="mode-git"><i class="bi bi-git me-1"></i>Git URL</label>
+        </div>
+        <div id="upload-zip">
           <input type="file" class="form-control form-control-sm" accept=".zip" id="upload-input">
         </div>
-        <button class="btn btn-sm btn-outline-secondary" onclick="uploadProject(${projectId})"><i class="bi bi-upload me-1"></i>Subir</button>
-        <button class="btn btn-sm btn-primary" onclick="startAuditAfterUpload(${projectId})"><i class="bi bi-shield me-1"></i>Auditar</button>
+        <div id="upload-git" class="d-none">
+          <input class="form-control form-control-sm" placeholder="https://github.com/usuario/repo.git" id="git-url-input">
+        </div>
       </div>
+      <hr>
+      <label class="text-secondary small d-block mb-1">Frameworks de seguridad</label>
+      <div id="detail-frameworks" class="d-flex flex-wrap gap-2 mb-2">${fwHtml}</div>
+      <button class="btn btn-primary btn-sm w-100" onclick="loadAndAudit(${projectId})">
+        <i class="bi bi-shield me-1"></i>Auditar con frameworks seleccionados
+      </button>
     `;
   } catch (err) {
     document.getElementById("detail-body").innerHTML = `<p class="text-danger small">${err.message}</p>`;
   }
+}
+
+function toggleUploadMode() {
+  const mode = document.querySelector('input[name="upload-mode"]:checked').value;
+  document.getElementById("upload-zip").classList.toggle("d-none", mode !== "zip");
+  document.getElementById("upload-git").classList.toggle("d-none", mode !== "git");
 }
 
 async function uploadProject(id) {
@@ -240,26 +273,32 @@ async function uploadProject(id) {
       method: "POST", headers: { "Authorization": "Bearer " + TOKEN }, body: form,
     });
     if (!r.ok) throw new Error((await r.json()).detail || "Error");
-    alert("Archivos subidos correctamente");
-    showProjectDetail(id);
-  } catch (err) { alert(err.message); }
+    return true;
+  } catch (err) { alert(err.message); return false; }
 }
 
-async function startAuditAfterUpload(projectId) {
-  const input = document.getElementById("upload-input");
-  if (input.files.length) {
-    const form = new FormData();
-    form.append("file", input.files[0]);
-    try {
-      const r = await fetch(`${API}/projects/${projectId}/upload`, {
-        method: "POST", headers: { "Authorization": "Bearer " + TOKEN }, body: form,
-      });
-      if (!r.ok) throw new Error((await r.json()).detail || "Error");
-    } catch (err) { alert("Error al subir: " + err.message); return; }
+async function loadAndAudit(projectId) {
+  const mode = document.querySelector('input[name="upload-mode"]:checked').value;
+  let gitUrl = null;
+  if (mode === "git") {
+    gitUrl = document.getElementById("git-url-input").value.trim();
+    if (!gitUrl) return alert("Ingresa una URL de Git");
+  } else {
+    const ok = await uploadProject(projectId);
+    if (!ok) return;
   }
-  await api("POST", "/audits/", { proyecto_id: projectId });
-  alert("Auditoría iniciada");
-  location.hash = "/audits";
+  const checks = document.querySelectorAll("#detail-frameworks .fw-check:checked");
+  const frameworks = Array.from(checks).map(c => c.value);
+  try {
+    await api("POST", "/audits/", {
+      proyecto_id: projectId,
+      git_url: gitUrl,
+      frameworks: frameworks.length ? frameworks : undefined,
+    });
+    bootstrap.Modal.getInstance(document.getElementById("detail-modal")).hide();
+    alert("Auditoría iniciada");
+    location.hash = "/audits";
+  } catch (err) { alert(err.message); }
 }
 
 // ---------- AUDITS ----------
@@ -270,7 +309,7 @@ async function renderAudits(ct) {
     const list = document.getElementById("audit-list");
     if (!audits.length) { document.getElementById("audit-empty").classList.remove("d-none"); return; }
     document.getElementById("audit-empty").classList.add("d-none");
-    const colors = { pendiente: "warning", en_progreso: "info", completado: "success", fallido: "danger" };
+    const colors = { pendiente: "warning", ejecutando: "info", completada: "success", fallida: "danger" };
     list.innerHTML = audits.map(a => {
       a.estado_color = colors[a.estado] || "secondary";
       a.created_at = a.created_at ? new Date(a.created_at).toLocaleDateString("es-CL") : "";
@@ -322,6 +361,87 @@ document.getElementById("audit-form").addEventListener("submit", async (e) => {
     document.getElementById("audit-alert").classList.remove("d-none");
   }
 });
+
+// ---------- AUDIT DETAIL / PROGRESS ----------
+async function showAuditDetail(auditId) {
+  stopPolling();
+  const modal = new bootstrap.Modal(document.getElementById("audit-detail-modal"));
+  document.getElementById("audit-detail-title").textContent = `Auditoría #${auditId}`;
+  document.getElementById("audit-detail-body").innerHTML = '<div class="text-center py-3"><div class="spinner-border spinner-border-sm text-secondary"></div> Cargando...</div>';
+  modal.show();
+  await refreshAuditProgress(auditId);
+  _pollInterval = setInterval(() => refreshAuditProgress(auditId), 2000);
+  document.getElementById("audit-detail-modal").addEventListener("hidden.bs.modal", () => stopPolling(), { once: true });
+}
+
+async function refreshAuditProgress(auditId) {
+  try {
+    const data = await api("GET", `/audits/${auditId}/progress`);
+    const view = document.getElementById("audit-detail-body");
+    let html = document.getElementById("tpl-progress-view").innerHTML;
+    const pct = data.percentage || 0;
+
+    const stateLabels = { pendiente: "Pendiente", ejecutando: "Ejecutando...", completada: "Completada", fallida: "Fallida" };
+    const stateColors = { pendiente: "warning", ejecutando: "info", completada: "success", fallida: "danger" };
+
+    const statusDiv = `<div class="mb-3 d-flex justify-content-between align-items-center">
+        <h6 class="mb-0 small fw-semibold">
+          <span class="badge bg-${stateColors[data.estado] || "secondary"}">${stateLabels[data.estado] || data.estado}</span>
+          <span class="text-secondary ms-2">${pct}%</span>
+        </h6>
+        <small class="text-secondary">Auditoría #${auditId}</small>
+      </div>`;
+    html = html.replace('id="pv-status"', `id="pv-status"`).replace('</div>', statusDiv + '</div>');
+
+    const barHtml = `style="width:${pct}%" class="progress-bar ${data.estado === 'completada' ? 'bg-success' : data.estado === 'fallida' ? 'bg-danger' : ''}"`;
+    html = html.replace('style="width:0%"', barHtml);
+
+    const sev = data.severity || {};
+    const sevHtml = `<div class="row g-2 mb-3">
+        <div class="col-3"><div class="card border-secondary text-center p-1"><small class="text-secondary">Crítica</small><b class="text-danger small">${sev.critical || 0}</b></div></div>
+        <div class="col-3"><div class="card border-secondary text-center p-1"><small class="text-secondary">Alta</small><b class="text-warning small">${sev.high || 0}</b></div></div>
+        <div class="col-3"><div class="card border-secondary text-center p-1"><small class="text-secondary">Media</small><b class="text-info small">${sev.medium || 0}</b></div></div>
+        <div class="col-3"><div class="card border-secondary text-center p-1"><small class="text-secondary">Baja</small><b class="text-secondary small">${sev.low || 0}</b></div></div>
+      </div>`;
+    html = html.replace('id="pv-severity"', `id="pv-severity"`).replace('</div>', sevHtml + '</div>');
+
+    html = html.replace('id="pv-message"', `id="pv-message"`).replace('</small>', `${data.message || ""}</small>`);
+
+    const steps = Array.isArray(data.steps) ? data.steps : [];
+    const statusMap = { pendiente: ["circle", "text-secondary"], ejecutando: ["arrow-repeat text-info", "text-info"], completado: ["check-circle-fill", "text-success"], fallido: ["x-circle-fill", "text-danger"] };
+    const stepsHtml = steps.length ? steps.map(s => {
+      const [icon, color] = statusMap[s && s.status] || ["circle", "text-secondary"];
+      const extra = s && s.vulnerabilities != null ? `<span class="badge bg-secondary-subtle text-secondary small">${s.vulnerabilities} vulns</span>` : "";
+      return `<div class="d-flex align-items-center gap-2 mb-1 py-1 px-2 rounded" style="background:rgba(255,255,255,.02)">
+        <i class="bi bi-${icon} ${color}"></i>
+        <span class="small flex-grow-1 ${color}">${s ? (s.name || "") : ""}</span>
+        ${extra}
+      </div>`;
+    }).join("") : '<p class="text-secondary small">Sin pasos registrados</p>';
+    html = html.replace('id="pv-steps"', `id="pv-steps"`).replace('</div>', stepsHtml + '</div>');
+
+    const fws = Array.isArray(data.frameworks) ? data.frameworks : [];
+    const fwLabels = { owasp: "OWASP", nist_csf: "NIST CSF", iso_27001: "ISO 27001", cis: "CIS", mitre_attck: "MITRE ATT&CK" };
+    const fwHtml = fws.length ? fws.map(f => `<span class="badge bg-secondary-subtle text-secondary small">${fwLabels[f] || f}</span>`).join(" ") : '<span class="text-secondary small">—</span>';
+    html = html.replace('id="pv-frameworks"', `id="pv-frameworks"`).replace('</div>', fwHtml + '</div>');
+
+    const actions = data.estado === "completada" ? `<button class="btn btn-sm btn-outline-secondary flex-grow-1" onclick="closeAuditDetail()"><i class="bi bi-x me-1"></i>Cerrar</button>` : "";
+    html = html.replace('id="pv-actions"', `id="pv-actions"`).replace('</div>', actions + '</div>');
+
+    document.getElementById("audit-detail-body").innerHTML = html;
+
+    if (data.estado === "completada" || data.estado === "fallida") {
+      stopPolling();
+    }
+  } catch (err) {
+    stopPolling();
+    document.getElementById("audit-detail-body").innerHTML = `<p class="text-danger small">${err.message}</p>`;
+  }
+}
+
+function closeAuditDetail() {
+  bootstrap.Modal.getInstance(document.getElementById("audit-detail-modal"))?.hide();
+}
 
 // ---------- PROFILE ----------
 async function renderProfile(ct) {

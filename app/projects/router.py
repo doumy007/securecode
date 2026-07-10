@@ -89,6 +89,7 @@ async def get_project(
     service = ProjectService(db)
     project = await service.get_project(project_id)
     files = await service.get_project_files(project_id)
+    auditorias = await service.get_project_auditorias(project_id)
     return ProyectoResponse(
         id=project.id,
         nombre=project.nombre,
@@ -103,7 +104,7 @@ async def get_project(
         created_at=project.created_at,
         updated_at=project.updated_at,
         archivos_count=len(files),
-        auditorias_count=len(project.auditorias),
+        auditorias_count=len(auditorias),
     )
 
 
@@ -117,6 +118,7 @@ async def update_project(
     service = ProjectService(db)
     project = await service.update_project(project_id, data.model_dump(exclude_none=True))
     files = await service.get_project_files(project_id)
+    auditorias = await service.get_project_auditorias(project_id)
     return ProyectoResponse(
         id=project.id,
         nombre=project.nombre,
@@ -131,7 +133,7 @@ async def update_project(
         created_at=project.created_at,
         updated_at=project.updated_at,
         archivos_count=len(files),
-        auditorias_count=len(project.auditorias),
+        auditorias_count=len(auditorias),
     )
 
 

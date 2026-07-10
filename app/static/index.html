@@ -145,6 +145,17 @@
   </div>
 </div>
 
+<div class="modal fade" id="audit-detail-modal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header"><h6 class="modal-title"><i class="bi bi-bug me-1 text-primary"></i><span id="audit-detail-title">Auditoría</span></h6><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body" id="audit-detail-body">
+        <div id="audit-progress-view"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- TEMPLATES -->
 <template id="tpl-dashboard">
   <div class="d-flex justify-content-between align-items-center mb-3">
@@ -190,6 +201,13 @@
   </div>
 </template>
 
+<template id="tpl-framework-check">
+  <div class="form-check">
+    <input class="form-check-input fw-check" type="checkbox" value="{id}" id="fw-{id}" checked>
+    <label class="form-check-label text-secondary small" for="fw-{id}">{label}</label>
+  </div>
+</template>
+
 <template id="tpl-audits">
   <div class="d-flex justify-content-between align-items-center mb-3">
     <h6 class="fw-normal mb-0"><i class="bi bi-shield me-2"></i>Auditorías</h6>
@@ -200,17 +218,44 @@
 </template>
 
 <template id="tpl-audit-row">
-  <div class="card mb-2">
+  <div class="card mb-2 audit-row" onclick="showAuditDetail('{id}')" style="cursor:pointer">
     <div class="card-body p-3 d-flex justify-content-between align-items-center">
       <div>
         <h6 class="mb-1 small"><i class="bi bi-bug me-1 text-primary"></i>{nombre}</h6>
         <small class="text-secondary">Proyecto: <span class="text-light">{proyecto_nombre}</span> &middot; {tipo}</small>
       </div>
-      <div class="text-end">
+      <div class="text-end d-flex align-items-center gap-2">
         <span class="badge bg-{estado_color} small">{estado}</span>
         <small class="d-block text-secondary mt-1">{created_at|raw}</small>
+        <i class="bi bi-chevron-right text-secondary"></i>
       </div>
     </div>
+  </div>
+</template>
+
+<template id="tpl-progress-view">
+  <div id="pv-status" class="mb-3"></div>
+  <div class="progress mb-3" style="height:8px">
+    <div id="pv-bar" class="progress-bar" role="progressbar" style="width:0%"></div>
+  </div>
+  <div class="row g-2 mb-3" id="pv-severity"></div>
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <small class="text-secondary fw-semibold">Pasos</small>
+    <small id="pv-message" class="text-secondary"></small>
+  </div>
+  <div id="pv-steps" class="mb-3"></div>
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <small class="text-secondary fw-semibold">Frameworks</small>
+  </div>
+  <div id="pv-frameworks" class="d-flex flex-wrap gap-1 mb-3"></div>
+  <div id="pv-actions" class="d-flex gap-2"></div>
+</template>
+
+<template id="tpl-step-item">
+  <div class="d-flex align-items-center gap-2 mb-1 py-1 px-2 rounded step-{status}">
+    <i class="bi bi-{icon} step-icon"></i>
+    <span class="small flex-grow-1">{name}</span>
+    {extra}
   </div>
 </template>
 

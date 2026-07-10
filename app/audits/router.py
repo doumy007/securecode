@@ -114,6 +114,16 @@ async def get_audit(
     )
 
 
+@router.get("/{audit_id}/progress")
+async def get_audit_progress(
+    audit_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(get_current_active_user),
+):
+    service = AuditService(db)
+    return await service.get_audit_progress(audit_id)
+
+
 @router.delete("/{audit_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_audit(
     audit_id: int,

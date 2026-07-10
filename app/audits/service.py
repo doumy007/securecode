@@ -51,6 +51,41 @@ class AuditService:
             raise NotFoundException("Auditoría no encontrada")
         return audit
 
+    async def get_audit_progress(self, audit_id: int) -> dict:
+        import json
+        audit = await self.get_audit(audit_id)
+        vulns = await self.get_audit_vulnerabilities(audit_id)
+        raw = audit.resultado_resumen
+        if isinstance(raw, str):
+            try: raw = json.loads(raw)
+            except: raw = {}
+        elif raw is None:
+            raw = {}
+        progress = raw.get("progress", {}) if isinstance(raw, dict) else {}
+        severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        for v in vulns:
+            if v.cvss_score is not None:
+                if v.cvss_score >= 9.0: severity_counts["critical"] += 1
+                elif v.cvss_score >= 7.0: severity_counts["high"] += 1
+                elif v.cvss_score >= 4.0: severity_counts["medium"] += 1
+                else: severity_counts["low"] += 1
+        frameworks = audit.frameworks or []
+        if isinstance(frameworks, str):
+            try: frameworks = json.loads(frameworks)
+            except: frameworks = []
+        if not isinstance(frameworks, list):
+            frameworks = []
+        return {
+            "audit_id": audit.id,
+            "estado": audit.estado,
+            "percentage": progress.get("percentage", 0 if audit.estado == "pendiente" else 100),
+            "steps": progress.get("steps", []),
+            "message": progress.get("message", ""),
+            "vulnerabilities_found": len(vulns),
+            "severity": severity_counts,
+            "frameworks": frameworks,
+        }
+
     async def get_project_audits(self, proyecto_id: int) -> list[Auditoria]:
         result = await self.db.execute(
             select(Auditoria).where(Auditoria.proyecto_id == proyecto_id)
