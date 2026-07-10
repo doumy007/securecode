@@ -45,3 +45,18 @@ def require_role(*roles: str):
             )
         return current_user
     return role_checker
+
+
+def require_permission(*permissions: str):
+    async def perm_checker(current_user: Usuario = Depends(get_current_active_user)):
+        user_perms = current_user.rol.permisos or []
+        if "*" in user_perms:
+            return current_user
+        for perm in permissions:
+            if perm not in user_perms:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Permiso requerido: {perm}",
+                )
+        return current_user
+    return perm_checker

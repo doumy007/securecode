@@ -85,8 +85,9 @@ class ProjectService:
                 file_size = os.path.getsize(full_path)
 
                 with open(full_path, 'rb') as f:
-                    content = f.read()
-                    file_hash = hashlib.sha256(content).hexdigest()
+                    raw = f.read()
+                    file_hash = hashlib.sha256(raw).hexdigest()
+                    text_content = raw.decode('utf-8', errors='replace')
 
                 lenguaje = self.detector.detect_language(rel_path)
 
@@ -96,6 +97,7 @@ class ProjectService:
                     hash=file_hash,
                     tamano=file_size,
                     lenguaje=lenguaje,
+                    contenido=text_content,
                 )
                 self.db.add(archivo)
                 files.append(archivo)

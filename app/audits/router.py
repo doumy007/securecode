@@ -1,13 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
+import asyncio
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
-from app.database import get_db
+from app.database import get_db, async_session_factory
 from app.audits.service import AuditService
 from app.audits.schemas import (
     AuditoriaCreate, AuditoriaResponse, VulnerabilidadResponse,
     MapeoEstandarResponse, TareaRemediacionResponse,
 )
-from app.dependencies import get_current_active_user
+from app.dependencies import get_current_active_user, require_role
 from app.auth.models import Usuario
 
 router = APIRouter()
@@ -16,7 +17,6 @@ router = APIRouter()
 @router.post("/", response_model=AuditoriaResponse, status_code=status.HTTP_201_CREATED)
 async def create_audit(
     data: AuditoriaCreate,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_active_user),
 ):
@@ -29,7 +29,16 @@ async def create_audit(
         git_url=data.git_url,
     )
 
-    background_tasks.add_task(service.run_audit_async, audit.id)
+    async def run_background():
+        async with async_session_factory() as bg_db:
+            bg_service = AuditService(bg_db)
+            try:
+                await bg_service.run_audit_async(audit.id)
+            except Exception:
+                pass
+            await bg_db.commit()
+
+    asyncio.create_task(run_background())
 
     nombre_proyecto = await service.get_proyecto_nombre(audit.proyecto_id)
     return AuditoriaResponse(
@@ -124,11 +133,21 @@ async def get_audit_progress(
     return await service.get_audit_progress(audit_id)
 
 
+@router.post("/reset-stuck")
+async def reset_stuck_audits(
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_role("admin")),
+):
+    service = AuditService(db)
+    count = await service.reset_stuck_audits()
+    return {"message": f"{count} auditorías atascadas reseteadas a fallida", "count": count}
+
+
 @router.delete("/{audit_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_audit(
     audit_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_active_user),
+    current_user: Usuario = Depends(require_role("admin")),
 ):
     service = AuditService(db)
     audit = await service.get_audit(audit_id)

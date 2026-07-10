@@ -141,10 +141,13 @@ async def update_project(
 async def delete_project(
     project_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_active_user),
+    current_user: Usuario = Depends(require_role("admin")),
 ):
     service = ProjectService(db)
     await service.delete_project(project_id)
+    project_dir = os.path.join(settings.APP_STORAGE_DIR, f"project_{project_id}")
+    if os.path.exists(project_dir):
+        shutil.rmtree(project_dir)
 
 
 @router.post("/{project_id}/upload")

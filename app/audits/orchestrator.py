@@ -1,5 +1,18 @@
-from app.projects.models import Proyecto
+import os
+import shutil
+import tempfile
+import hashlib
+import asyncio
+import datetime
+import logging
+from git import Repo
+from typing import Optional
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import SQLAlchemyError
+from app.projects.models import Proyecto, ArchivoProyecto
 from app.projects.service import ProjectService
+from app.projects.detector import LanguageDetector
 from app.workers.sonarqube import SonarQubeWorker
 from app.workers.semgrep import SemgrepWorker
 from app.workers.dependency_check import DependencyCheckWorker
@@ -11,11 +24,6 @@ from app.ai.analyzer import AIAnalyzer
 from app.compliance.engine import ComplianceEngine
 from app.compliance.risk_calculator import RiskCalculator
 from app.audits.models import Auditoria, ResultadoWorker, Vulnerabilidad
-from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional
-import asyncio
-import datetime
-import logging
 
 logger = logging.getLogger("securecode.audit")
 
@@ -30,6 +38,7 @@ WORKER_STEPS = [
 ]
 
 EXTRA_STEPS = [
+    ("git_clone", "Clonando repositorio"),
     ("ai_analysis", "Análisis con IA"),
     ("compliance", "Evaluación de cumplimiento"),
     ("aggregation", "Generando resultados"),
@@ -55,14 +64,78 @@ class AuditOrchestrator:
 
     async def _update_progress(self, audit: Auditoria, percentage: int, steps: list,
                                 message: str, vulns_found: int = 0):
-        audit.resultado_resumen = audit.resultado_resumen or {}
-        audit.resultado_resumen["progress"] = {
+        raw = audit.resultado_resumen if isinstance(audit.resultado_resumen, dict) else {}
+        raw["progress"] = {
             "percentage": percentage,
             "steps": steps,
             "message": message,
             "vulnerabilities_found": vulns_found,
         }
+        audit.resultado_resumen = raw
         await self.db.commit()
+
+    async def _clone_and_load_files(self, audit: Auditoria, project: Proyecto) -> list[ArchivoProyecto]:
+        existing = await self.project_service.get_project_files(project.id)
+        if existing:
+            return existing
+
+        git_url = audit.git_url
+        if not git_url:
+            return []
+
+        loop = asyncio.get_event_loop()
+        clone_dir = tempfile.mkdtemp(prefix=f"sc_clone_{project.id}_")
+        try:
+            logger.info(f"Clonando {git_url} en {clone_dir}")
+            await loop.run_in_executor(None, lambda: Repo.clone_from(git_url, clone_dir, depth=1))
+
+            detector = LanguageDetector()
+            created = []
+            for root, dirs, filenames in os.walk(clone_dir):
+                dirs[:] = [d for d in dirs if d != '.git']
+                for filename in filenames:
+                    full_path = os.path.join(root, filename)
+                    try:
+                        with open(full_path, 'rb') as f:
+                            raw = f.read()
+                        text = raw.decode('utf-8', errors='replace')
+                    except Exception:
+                        continue
+                    rel_path = os.path.relpath(full_path, clone_dir)
+                    file_hash = hashlib.sha256(raw).hexdigest()
+                    lenguaje = detector.detect_language(rel_path)
+                    MAX_BYTES = 65000
+                    encoded = text.encode('utf-8')[:MAX_BYTES]
+                    contenido = encoded.decode('utf-8', errors='replace')
+                    archivo = ArchivoProyecto(
+                        proyecto_id=project.id,
+                        ruta=rel_path.replace("\\", "/"),
+                        hash=file_hash,
+                        tamano=len(raw),
+                        lenguaje=lenguaje,
+                        contenido=contenido,
+                    )
+                    self.db.add(archivo)
+                    created.append(archivo)
+
+            if created:
+                project.lenguaje = detector.detect_project_language(created)
+                project.framework = detector.detect_framework(clone_dir)
+                project.estado = "en_revision"
+
+            await self.db.commit()
+            logger.info(f"Clonado completado: {len(created)} archivos")
+            return created
+
+        except Exception as e:
+            logger.exception("Error clonando repositorio")
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            shutil.rmtree(clone_dir, ignore_errors=True)
 
     async def run_audit(self, audit: Auditoria) -> dict:
         logger.info(f"Iniciando auditoría {audit.id} para proyecto {audit.proyecto_id}")
@@ -71,7 +144,6 @@ class AuditOrchestrator:
 
         try:
             project = await self.project_service.get_project(audit.proyecto_id)
-            files = await self.project_service.get_project_files(audit.proyecto_id)
 
             total_steps = len(WORKER_STEPS) + len(EXTRA_STEPS)
             steps_status = []
@@ -80,19 +152,26 @@ class AuditOrchestrator:
             for _, label in EXTRA_STEPS:
                 steps_status.append({"name": label, "status": "pendiente"})
 
-            await self._update_progress(audit, 0, steps_status,
-                                        "Preparando análisis...")
+            # Step 0: Clone repo if needed (index 0 in EXTRA_STEPS)
+            w = len(WORKER_STEPS)  # clone step is at index n_workers
+            steps_status[w]["status"] = "ejecutando"
+            await self._update_progress(audit, 0, steps_status, "Clonando repositorio...")
+            files = await self._clone_and_load_files(audit, project)
+            steps_status[w]["status"] = "completado"
+            steps_status[w]["files_count"] = len(files)
+            await self._update_progress(audit, 2, steps_status, f"Clonado: {len(files)} archivos cargados", 0)
+
+            if not files:
+                raise Exception("No se encontraron archivos para analizar. Verifica que el repositorio contenga código fuente.")
 
             all_vulns = []
             for i, (worker_cls, label) in enumerate(WORKER_STEPS):
                 worker = self.workers[i]
                 steps_status[i]["status"] = "ejecutando"
+                pct = int((i / total_steps) * 98) + 2
                 await self._update_progress(
-                    audit,
-                    int((i / total_steps) * 100),
-                    steps_status,
-                    f"Ejecutando: {label}",
-                    len(all_vulns),
+                    audit, pct, steps_status,
+                    f"Escaneando: {label}", len(all_vulns),
                 )
 
                 try:
@@ -112,10 +191,8 @@ class AuditOrchestrator:
                     steps_status[i]["status"] = "completado"
                     steps_status[i]["vulnerabilities"] = len(vulns)
                     await self._update_progress(
-                        audit,
-                        int(((i + 0.5) / total_steps) * 100),
-                        steps_status,
-                        f"Completado: {label} ({len(vulns)} vulnerabilidades)",
+                        audit, pct, steps_status,
+                        f"✓ {label}: {len(vulns)} vulnerabilidades encontradas",
                         len(all_vulns),
                     )
                 except Exception as e:
@@ -133,60 +210,56 @@ class AuditOrchestrator:
                     steps_status[i]["status"] = "fallido"
                     steps_status[i]["error"] = str(e)
                     await self._update_progress(
-                        audit,
-                        int(((i + 0.5) / total_steps) * 100),
-                        steps_status,
-                        f"Falló: {label}",
+                        audit, pct, steps_status,
+                        f"✗ {label}: {str(e)[:80]}",
                         len(all_vulns),
                     )
 
             n_workers = len(WORKER_STEPS)
+            n_extra = len(EXTRA_STEPS)
+            ai_idx = w + 1
+            comp_idx = w + 2
+            agg_idx = w + 3
 
-            steps_status[n_workers]["status"] = "ejecutando"
-            await self._update_progress(
-                audit,
-                int(((n_workers + 0.3) / total_steps) * 100),
-                steps_status,
-                "Analizando vulnerabilidades con IA...",
-                len(all_vulns),
-            )
-            ai_analysis = await self.ai_analyzer.analyze_vulnerabilities(all_vulns)
-            steps_status[n_workers]["status"] = "completado"
-            await self._update_progress(
-                audit,
-                int(((n_workers + 0.6) / total_steps) * 100),
-                steps_status,
-                "Evaluando cumplimiento normativo...",
-                len(all_vulns),
-            )
+            ai_analysis = {"analysis": [], "action_plan": {}}
+            compliance_results = {"overall_score": 0}
+            risk_scores = {}
+            vulnerabilities = []
 
-            steps_status[n_workers + 1]["status"] = "ejecutando"
-            await self._update_progress(
-                audit,
-                int(((n_workers + 0.8) / total_steps) * 100),
-                steps_status,
-                "Calculando riesgos...",
-                len(all_vulns),
-            )
-            compliance_results = self.compliance_engine.evaluate(ai_analysis)
-            risk_scores = self.risk_calculator.calculate_all(ai_analysis)
-            steps_status[n_workers + 1]["status"] = "completado"
+            if ai_idx < n_workers + n_extra:
+                steps_status[ai_idx]["status"] = "ejecutando"
+                await self._update_progress(
+                    audit, 92, steps_status,
+                    "Analizando vulnerabilidades con IA...", len(all_vulns),
+                )
+                ai_analysis = await self.ai_analyzer.analyze_vulnerabilities(all_vulns)
+                steps_status[ai_idx]["status"] = "completado"
 
-            steps_status[n_workers + 2]["status"] = "ejecutando"
-            await self._update_progress(
-                audit,
-                int(((n_workers + 1) / total_steps) * 100),
-                steps_status,
-                "Guardando resultados...",
-                len(all_vulns),
-            )
-            vulnerabilities = await self.aggregator.save_results(
-                audit.id, all_vulns, ai_analysis, compliance_results, risk_scores
-            )
-            steps_status[n_workers + 2]["status"] = "completado"
+            # Compliance
+            if comp_idx < n_workers + n_extra:
+                steps_status[comp_idx]["status"] = "ejecutando"
+                await self._update_progress(
+                    audit, 95, steps_status,
+                    "Evaluando cumplimiento normativo...", len(all_vulns),
+                )
+                compliance_results = self.compliance_engine.evaluate(ai_analysis)
+                risk_scores = self.risk_calculator.calculate_all(ai_analysis)
+                steps_status[comp_idx]["status"] = "completado"
+
+            # Aggregation
+            if agg_idx < n_workers + n_extra:
+                steps_status[agg_idx]["status"] = "ejecutando"
+                await self._update_progress(
+                    audit, 98, steps_status,
+                    "Guardando resultados...", len(all_vulns),
+                )
+                vulnerabilities = await self.aggregator.save_results(
+                    audit.id, all_vulns, ai_analysis, compliance_results, risk_scores
+                )
+                steps_status[agg_idx]["status"] = "completado"
 
             audit.estado = "completada"
-            audit.completed_at = datetime.utcnow()
+            audit.completed_at = datetime.datetime.utcnow()
             audit.resultado_resumen = {
                 "total_vulnerabilities": len(vulnerabilities),
                 "critical": sum(1 for v in vulnerabilities if v.cvss_score and v.cvss_score >= 9.0),
@@ -205,13 +278,19 @@ class AuditOrchestrator:
 
             return audit.resultado_resumen
 
-        except Exception as e:
+        except (SQLAlchemyError, Exception) as e:
             logger.exception(f"Error en auditoría {audit.id}")
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
             audit.estado = "fallida"
+            raw = audit.resultado_resumen if isinstance(audit.resultado_resumen, dict) else {}
             audit.resultado_resumen = {
                 "error": str(e),
                 "progress": {
-                    "percentage": 100 if "fallida" else audit.resultado_resumen.get("progress", {}).get("percentage", 0),
+                    "percentage": raw.get("progress", {}).get("percentage", 0) if isinstance(raw, dict) else 0,
+                    "steps": raw.get("progress", {}).get("steps", []) if isinstance(raw, dict) else [],
                     "message": f"Error: {str(e)}",
                     "vulnerabilities_found": 0,
                 },

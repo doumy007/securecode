@@ -1,4 +1,5 @@
 import datetime
+from datetime import timedelta
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
@@ -95,19 +96,23 @@ class AuditService:
 
     async def get_user_audits(self, user_id: int, skip: int = 0, limit: int = 100) -> list[Auditoria]:
         from sqlalchemy.orm import selectinload
+        from sqlalchemy import distinct
         result = await self.db.execute(
             select(Auditoria)
             .options(selectinload(Auditoria.proyecto))
             .where(Auditoria.user_id == user_id)
+            .distinct()
             .offset(skip).limit(limit).order_by(Auditoria.created_at.desc())
         )
         return result.scalars().all()
 
     async def get_all_audits(self, skip: int = 0, limit: int = 100) -> list[Auditoria]:
         from sqlalchemy.orm import selectinload
+        from sqlalchemy import distinct
         result = await self.db.execute(
             select(Auditoria)
             .options(selectinload(Auditoria.proyecto))
+            .distinct()
             .offset(skip).limit(limit).order_by(Auditoria.created_at.desc())
         )
         return result.scalars().all()
@@ -184,3 +189,17 @@ class AuditService:
             "medium": sum(1 for v in vulns if v.cvss_score and 4.0 <= v.cvss_score < 7.0),
             "low": sum(1 for v in vulns if v.cvss_score and v.cvss_score < 4.0),
         }
+
+    async def reset_stuck_audits(self) -> int:
+        result = await self.db.execute(
+            select(Auditoria).where(Auditoria.estado == "ejecutando")
+            .where(Auditoria.created_at < datetime.utcnow() - timedelta(hours=1))
+        )
+        stuck = result.scalars().all()
+        count = 0
+        for a in stuck:
+            a.estado = "fallida"
+            a.completed_at = datetime.utcnow()
+            count += 1
+        await self.db.commit()
+        return count

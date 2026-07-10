@@ -30,6 +30,7 @@ class UsuarioResponse(BaseModel):
     mfa_enabled: bool
     rol: RolResponse
     rol_nombre: Optional[str] = None
+    permisos: list = []
     ultimo_login: Optional[datetime] = None
     created_at: Optional[datetime] = None
 
@@ -76,3 +77,22 @@ class ChangePasswordRequest(BaseModel):
 class UsuarioUpdate(BaseModel):
     nombre_completo: Optional[str] = None
     email: Optional[str] = None
+
+
+class UsuarioUpdateAdmin(BaseModel):
+    nombre_completo: Optional[str] = None
+    email: Optional[str] = None
+    activo: Optional[bool] = None
+    rol_id: Optional[int] = None
+
+
+class RolCreate(BaseModel):
+    nombre: str = Field(..., min_length=1, max_length=50)
+    descripcion: Optional[str] = None
+    permisos: List[str] = []
+
+
+class RolUpdate(BaseModel):
+    nombre: Optional[str] = None
+    descripcion: Optional[str] = None
+    permisos: Optional[List[str]] = None

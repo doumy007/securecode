@@ -40,6 +40,7 @@ class Auditoria(Base):
     resultados_workers = relationship("ResultadoWorker", back_populates="auditoria", cascade="all, delete-orphan")
     vulnerabilidades = relationship("Vulnerabilidad", back_populates="auditoria", cascade="all, delete-orphan")
     tareas_remediacion = relationship("TareaRemediacion", back_populates="auditoria", cascade="all, delete-orphan")
+    historial = relationship("HistorialEjecucion", back_populates="auditoria", cascade="all, delete-orphan")
 
 
 class ResultadoWorker(Base):
@@ -123,4 +124,5 @@ class HistorialEjecucion(Base):
     auditoria_id = Column(Integer, ForeignKey("sc_auditorias.id"), nullable=False)
     evento = Column(String(255), nullable=False)
     detalle = Column(JSON)
+    auditoria = relationship("Auditoria", back_populates="historial")
     created_at = Column(DateTime, default=datetime.datetime.utcnow)

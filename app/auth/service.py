@@ -65,6 +65,12 @@ class AuthService:
             select(Usuario).options(selectinload(Usuario.rol)).where(Usuario.id == user.id)
         )
         user = result.scalar_one_or_none()
+        if user and user.rol:
+            from sqlalchemy import select as sa_select
+            from app.auth.models import Rol
+            r = await self.db.execute(sa_select(Rol.nombre).where(Rol.id == user.rol_id))
+            row = r.scalar_one_or_none()
+            user.rol_nombre = row or user.rol.nombre
         return user
 
     async def authenticate_user(self, username: str, password: str) -> Usuario:
@@ -165,12 +171,73 @@ class AuthService:
         return True
 
     async def get_users(self, skip: int = 0, limit: int = 100) -> list[Usuario]:
-        result = await self.db.execute(select(Usuario).offset(skip).limit(limit))
-        return result.scalars().all()
+        result = await self.db.execute(
+            select(Usuario).options(selectinload(Usuario.rol)).offset(skip).limit(limit)
+        )
+        users = result.scalars().all()
+        for u in users:
+            if u.rol:
+                u.rol_nombre = u.rol.nombre
+        return users
 
     async def get_user_by_id(self, user_id: int) -> Usuario:
-        result = await self.db.execute(select(Usuario).where(Usuario.id == user_id))
+        result = await self.db.execute(
+            select(Usuario).options(selectinload(Usuario.rol)).where(Usuario.id == user_id)
+        )
         user = result.scalar_one_or_none()
         if not user:
             raise NotFoundException("Usuario no encontrado")
+        if user.rol:
+            user.rol_nombre = user.rol.nombre
         return user
+
+    async def update_user(self, user_id: int, data: dict) -> Usuario:
+        user = await self.get_user_by_id(user_id)
+        for key, value in data.items():
+            if value is not None and hasattr(user, key):
+                setattr(user, key, value)
+        await self.db.commit()
+        await self.db.refresh(user)
+        result = await self.db.execute(
+            select(Usuario).options(selectinload(Usuario.rol)).where(Usuario.id == user.id)
+        )
+        return result.scalar_one_or_none()
+
+    async def delete_user(self, user_id: int):
+        user = await self.get_user_by_id(user_id)
+        await self.db.delete(user)
+        await self.db.commit()
+
+    async def get_roles(self) -> list[Rol]:
+        result = await self.db.execute(select(Rol).order_by(Rol.id))
+        return result.scalars().all()
+
+    async def create_role(self, nombre: str, descripcion: Optional[str] = None, permisos: list = None) -> Rol:
+        result = await self.db.execute(select(Rol).where(Rol.nombre == nombre))
+        if result.scalar_one_or_none():
+            raise ConflictException(f"El rol '{nombre}' ya existe")
+        rol = Rol(nombre=nombre, descripcion=descripcion, permisos=permisos or [])
+        self.db.add(rol)
+        await self.db.commit()
+        await self.db.refresh(rol)
+        return rol
+
+    async def update_role(self, role_id: int, data: dict) -> Rol:
+        result = await self.db.execute(select(Rol).where(Rol.id == role_id))
+        rol = result.scalar_one_or_none()
+        if not rol:
+            raise NotFoundException("Rol no encontrado")
+        for key, value in data.items():
+            if value is not None and hasattr(rol, key):
+                setattr(rol, key, value)
+        await self.db.commit()
+        await self.db.refresh(rol)
+        return rol
+
+    async def delete_role(self, role_id: int):
+        result = await self.db.execute(select(Rol).where(Rol.id == role_id))
+        rol = result.scalar_one_or_none()
+        if not rol:
+            raise NotFoundException("Rol no encontrado")
+        await self.db.delete(rol)
+        await self.db.commit()

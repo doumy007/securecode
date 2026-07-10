@@ -6,8 +6,9 @@ from app.auth.schemas import (
     UsuarioCreate, UsuarioResponse, TokenResponse, LoginRequest,
     MFASetupResponse, MFAVerifyRequest, MFAVerifyResponse,
     RefreshTokenRequest, ChangePasswordRequest, UsuarioUpdate,
+    UsuarioUpdateAdmin, RolCreate, RolUpdate, RolResponse,
 )
-from app.dependencies import get_current_active_user, require_role
+from app.dependencies import get_current_active_user, require_role, require_permission
 from app.auth.models import Usuario
 
 router = APIRouter()
@@ -155,3 +156,81 @@ async def get_user(
 ):
     service = AuthService(db)
     return await service.get_user_by_id(user_id)
+
+
+@router.post("/users", response_model=UsuarioResponse, status_code=status.HTTP_201_CREATED)
+async def admin_create_user(
+    data: UsuarioCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_role("admin")),
+):
+    service = AuthService(db)
+    user = await service.register_user(
+        username=data.username,
+        email=data.email,
+        password=data.password,
+        nombre_completo=data.nombre_completo,
+        rol_id=data.rol_id,
+    )
+    return user
+
+
+@router.put("/users/{user_id}", response_model=UsuarioResponse)
+async def admin_update_user(
+    user_id: int,
+    data: UsuarioUpdateAdmin,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_role("admin")),
+):
+    service = AuthService(db)
+    return await service.update_user(user_id, data.model_dump(exclude_none=True))
+
+
+@router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def admin_delete_user(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_role("admin")),
+):
+    service = AuthService(db)
+    await service.delete_user(user_id)
+
+
+@router.get("/roles", response_model=list[RolResponse])
+async def list_roles(
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_role("admin")),
+):
+    service = AuthService(db)
+    return await service.get_roles()
+
+
+@router.post("/roles", response_model=RolResponse, status_code=status.HTTP_201_CREATED)
+async def create_role(
+    data: RolCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_role("admin")),
+):
+    service = AuthService(db)
+    return await service.create_role(nombre=data.nombre, descripcion=data.descripcion, permisos=data.permisos)
+
+
+@router.put("/roles/{role_id}", response_model=RolResponse)
+async def update_role(
+    role_id: int,
+    data: RolUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_role("admin")),
+):
+    service = AuthService(db)
+    return await service.update_role(role_id, data.model_dump(exclude_none=True))
+
+
+@router.delete("/roles/{role_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_role(
+    role_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(require_role("admin")),
+):
+    service = AuthService(db)
+    await service.delete_role(role_id)

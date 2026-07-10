@@ -16,13 +16,14 @@ async function api(method, path, body) {
     try { const j = await r.json(); msg = j.detail || msg; } catch {}
     throw new Error(msg);
   }
+  if (r.status === 204) return true;
   return r.json();
 }
 
 function hashRoute() {
   const hash = location.hash.slice(1) || "/";
   if (!TOKEN) { showPage("login"); return; }
-  const routes = { "/": "dashboard", "/projects": "projects", "/audits": "audits", "/profile": "profile" };
+  const routes = { "/": "dashboard", "/projects": "projects", "/audits": "audits", "/profile": "profile", "/admin": "admin" };
   showPage(routes[hash] || "dashboard");
 }
 window.addEventListener("hashchange", hashRoute);
@@ -39,7 +40,7 @@ function showPage(name) {
   }
   document.getElementById("page-layout").classList.remove("d-none");
   document.querySelectorAll("#sidebar .nav-link").forEach(a => a.classList.remove("active"));
-  const map = { dashboard: "/", projects: "/projects", audits: "/audits", profile: "/profile" };
+  const map = { dashboard: "/", projects: "/projects", audits: "/audits", profile: "/profile", admin: "/admin" };
   const sel = document.querySelector(`#sidebar .nav-link[href="#${map[name]}"]`);
   if (sel) sel.classList.add("active");
   loadPage(name);
@@ -51,6 +52,7 @@ function loadPage(name) {
   else if (name === "projects") renderProjects(ct);
   else if (name === "audits") renderAudits(ct);
   else if (name === "profile") renderProfile(ct);
+  else if (name === "admin") renderAdmin(ct);
 }
 
 function stopPolling() {
@@ -73,6 +75,9 @@ document.getElementById("login-form").addEventListener("submit", async (e) => {
     setToken(data.access_token);
     USER = await api("GET", "/auth/me");
     document.getElementById("sidebar-user").textContent = USER.username;
+    if (USER.rol_nombre === "admin" || USER.rol?.nombre === "admin") {
+      document.getElementById("nav-admin").classList.remove("d-none");
+    }
     location.hash = "/";
   } catch (err) {
     document.getElementById("login-alert").textContent = err.message;
@@ -175,12 +180,14 @@ function renderProjectList() {
   const filtered = (window._projects || []).filter(p => (p.nombre || "").toLowerCase().includes(q));
   if (!filtered.length) { list.innerHTML = ""; document.getElementById("project-empty").classList.remove("d-none"); return; }
   document.getElementById("project-empty").classList.add("d-none");
+  const isAdmin = USER?.rol_nombre === "admin" || USER?.rol?.nombre === "admin";
   list.innerHTML = filtered.map(p => {
     p.created_at = p.created_at ? new Date(p.created_at).toLocaleDateString("es-CL") : "";
     p.lenguaje = p.lenguaje || "—";
     p.framework = p.framework || "";
     return fillTpl(document.getElementById("tpl-project-card").innerHTML, p);
   }).join("");
+  if (isAdmin) document.querySelectorAll(".admin-only").forEach(el => el.classList.remove("d-none"));
 }
 
 function showNewProject() { new bootstrap.Modal(document.getElementById("project-modal")).show(); }
@@ -310,14 +317,24 @@ async function renderAudits(ct) {
     if (!audits.length) { document.getElementById("audit-empty").classList.remove("d-none"); return; }
     document.getElementById("audit-empty").classList.add("d-none");
     const colors = { pendiente: "warning", ejecutando: "info", completada: "success", fallida: "danger" };
+    const isAdmin = USER?.rol_nombre === "admin" || USER?.rol?.nombre === "admin";
     list.innerHTML = audits.map(a => {
       a.estado_color = colors[a.estado] || "secondary";
       a.created_at = a.created_at ? new Date(a.created_at).toLocaleDateString("es-CL") : "";
       a.proyecto_nombre = a.proyecto_nombre || "—";
       a.nombre = a.nombre || `Auditoría #${a.id}`;
       a.tipo = a.tipo || "automática";
+      let errMsg = "";
+      if (a.estado === "fallida" && a.resultado_resumen) {
+        try {
+          const rr = typeof a.resultado_resumen === "string" ? JSON.parse(a.resultado_resumen) : a.resultado_resumen;
+          errMsg = rr?.error || rr?.progress?.message || "";
+        } catch {}
+      }
+      a.error_msg = errMsg ? `<small class="text-danger d-block text-truncate" style="max-width:260px" title="${errMsg}"><i class="bi bi-exclamation-triangle me-1"></i>${errMsg}</small>` : "";
       return fillTpl(document.getElementById("tpl-audit-row").innerHTML, a);
     }).join("");
+    if (isAdmin) document.querySelectorAll(".admin-only").forEach(el => el.classList.remove("d-none"));
   } catch (err) {
     document.getElementById("audit-list").innerHTML = `<p class="text-danger small">${err.message}</p>`;
   }
@@ -378,69 +395,127 @@ async function refreshAuditProgress(auditId) {
   try {
     const data = await api("GET", `/audits/${auditId}/progress`);
     const view = document.getElementById("audit-detail-body");
-    let html = document.getElementById("tpl-progress-view").innerHTML;
     const pct = data.percentage || 0;
+    const done = data.estado === "completada" || data.estado === "fallida";
 
     const stateLabels = { pendiente: "Pendiente", ejecutando: "Ejecutando...", completada: "Completada", fallida: "Fallida" };
     const stateColors = { pendiente: "warning", ejecutando: "info", completada: "success", fallida: "danger" };
 
-    const statusDiv = `<div class="mb-3 d-flex justify-content-between align-items-center">
-        <h6 class="mb-0 small fw-semibold">
-          <span class="badge bg-${stateColors[data.estado] || "secondary"}">${stateLabels[data.estado] || data.estado}</span>
-          <span class="text-secondary ms-2">${pct}%</span>
-        </h6>
-        <small class="text-secondary">Auditoría #${auditId}</small>
-      </div>`;
-    html = html.replace('id="pv-status"', `id="pv-status"`).replace('</div>', statusDiv + '</div>');
+    // Status header
+    const statusHtml = `<div class="d-flex justify-content-between align-items-center">
+      <h6 class="mb-0 small fw-semibold">
+        <span class="badge bg-${stateColors[data.estado] || "secondary"}">${stateLabels[data.estado] || data.estado}</span>
+        <span class="text-secondary ms-2">${pct}%</span>
+      </h6>
+      <small class="text-secondary">Auditoría #${auditId}</small>
+    </div>`;
 
-    const barHtml = `style="width:${pct}%" class="progress-bar ${data.estado === 'completada' ? 'bg-success' : data.estado === 'fallida' ? 'bg-danger' : ''}"`;
-    html = html.replace('style="width:0%"', barHtml);
+    // Progress bar
+    const barColor = data.estado === "completada" ? "bg-success" : data.estado === "fallida" ? "bg-danger" : "bg-info";
+    const barAnimated = data.estado === "ejecutando" ? "progress-bar-striped progress-bar-animated" : "";
+    const barHtml = `<div class="progress mb-3" style="height:10px;border-radius:6px;background:rgba(255,255,255,.06)">
+      <div class="progress-bar ${barColor} ${barAnimated}" role="progressbar" style="width:${pct}%;transition:width .5s ease"></div>
+    </div>`;
 
+    // Error banner
+    const error = data.estado === "fallida" ? data.message || "" : "";
+    const errorBarHtml = error ? `<div class="alert alert-danger py-2 small mb-2"><i class="bi bi-exclamation-triangle me-1"></i>${error}</div>` : "";
+
+    // Severity cards (only show if there are vulnerabilities)
     const sev = data.severity || {};
-    const sevHtml = `<div class="row g-2 mb-3">
-        <div class="col-3"><div class="card border-secondary text-center p-1"><small class="text-secondary">Crítica</small><b class="text-danger small">${sev.critical || 0}</b></div></div>
-        <div class="col-3"><div class="card border-secondary text-center p-1"><small class="text-secondary">Alta</small><b class="text-warning small">${sev.high || 0}</b></div></div>
-        <div class="col-3"><div class="card border-secondary text-center p-1"><small class="text-secondary">Media</small><b class="text-info small">${sev.medium || 0}</b></div></div>
-        <div class="col-3"><div class="card border-secondary text-center p-1"><small class="text-secondary">Baja</small><b class="text-secondary small">${sev.low || 0}</b></div></div>
-      </div>`;
-    html = html.replace('id="pv-severity"', `id="pv-severity"`).replace('</div>', sevHtml + '</div>');
+    const hasVulns = (sev.critical || 0) + (sev.high || 0) + (sev.medium || 0) + (sev.low || 0) > 0;
+    const sevHtml = hasVulns ? `<div class="row g-2 mb-3">
+      <div class="col-3"><div class="card border-secondary text-center p-1"><small class="text-secondary">Crítica</small><b class="text-danger small">${sev.critical || 0}</b></div></div>
+      <div class="col-3"><div class="card border-secondary text-center p-1"><small class="text-secondary">Alta</small><b class="text-warning small">${sev.high || 0}</b></div></div>
+      <div class="col-3"><div class="card border-secondary text-center p-1"><small class="text-secondary">Media</small><b class="text-info small">${sev.medium || 0}</b></div></div>
+      <div class="col-3"><div class="card border-secondary text-center p-1"><small class="text-secondary">Baja</small><b class="text-secondary small">${sev.low || 0}</b></div></div>
+    </div>` : "";
 
-    html = html.replace('id="pv-message"', `id="pv-message"`).replace('</small>', `${data.message || ""}</small>`);
-
+    // Current step indicator
+    let currentStep = "";
     const steps = Array.isArray(data.steps) ? data.steps : [];
-    const statusMap = { pendiente: ["circle", "text-secondary"], ejecutando: ["arrow-repeat text-info", "text-info"], completado: ["check-circle-fill", "text-success"], fallido: ["x-circle-fill", "text-danger"] };
-    const stepsHtml = steps.length ? steps.map(s => {
-      const [icon, color] = statusMap[s && s.status] || ["circle", "text-secondary"];
-      const extra = s && s.vulnerabilities != null ? `<span class="badge bg-secondary-subtle text-secondary small">${s.vulnerabilities} vulns</span>` : "";
-      return `<div class="d-flex align-items-center gap-2 mb-1 py-1 px-2 rounded" style="background:rgba(255,255,255,.02)">
-        <i class="bi bi-${icon} ${color}"></i>
-        <span class="small flex-grow-1 ${color}">${s ? (s.name || "") : ""}</span>
-        ${extra}
-      </div>`;
-    }).join("") : '<p class="text-secondary small">Sin pasos registrados</p>';
-    html = html.replace('id="pv-steps"', `id="pv-steps"`).replace('</div>', stepsHtml + '</div>');
-
-    const fws = Array.isArray(data.frameworks) ? data.frameworks : [];
-    const fwLabels = { owasp: "OWASP", nist_csf: "NIST CSF", iso_27001: "ISO 27001", cis: "CIS", mitre_attck: "MITRE ATT&CK" };
-    const fwHtml = fws.length ? fws.map(f => `<span class="badge bg-secondary-subtle text-secondary small">${fwLabels[f] || f}</span>`).join(" ") : '<span class="text-secondary small">—</span>';
-    html = html.replace('id="pv-frameworks"', `id="pv-frameworks"`).replace('</div>', fwHtml + '</div>');
-
-    const actions = data.estado === "completada" ? `<button class="btn btn-sm btn-outline-secondary flex-grow-1" onclick="closeAuditDetail()"><i class="bi bi-x me-1"></i>Cerrar</button>` : "";
-    html = html.replace('id="pv-actions"', `id="pv-actions"`).replace('</div>', actions + '</div>');
-
-    document.getElementById("audit-detail-body").innerHTML = html;
-
-    if (data.estado === "completada" || data.estado === "fallida") {
-      stopPolling();
+    const runningStep = steps.find(s => s && s.status === "ejecutando");
+    if (runningStep && data.estado !== "completada" && data.estado !== "fallida") {
+      currentStep = `<div class="badge bg-info-subtle text-info px-2 py-1 small mb-2"><i class="bi bi-arrow-repeat me-1"></i>${runningStep.name || "Ejecutando..."}</div>`;
     }
+
+    // Message
+    const msgHtml = data.message ? `<small class="text-secondary">${data.message}</small>` : "";
+
+    // Interactive log - show all steps like a chat/log
+    const statusMap = { pendiente: ["circle", "text-secondary"], ejecutando: ["arrow-repeat text-info", "text-info"], completado: ["check-circle-fill text-success", "text-success"], fallido: ["x-circle-fill text-danger", "text-danger"] };
+    const logHtml = steps.length ? `<div class="mb-3" style="max-height:320px;overflow-y:auto">` + steps.map((s, idx) => {
+      if (!s) return "";
+      const [icon, color] = statusMap[s.status] || ["circle", "text-secondary"];
+      const vulns = s.vulnerabilities != null ? `<span class="badge bg-secondary-subtle text-secondary small ms-2">${s.vulnerabilities} encontradas</span>` : "";
+      const err = s.error ? `<small class="text-danger d-block ms-3">${s.error}</small>` : "";
+      const bg = s.status === "ejecutando" ? "style='background:rgba(13,202,240,.08);border-left:2px solid #0dcaf0'" : 
+                 s.status === "fallido" ? "style='background:rgba(220,53,69,.06);border-left:2px solid #dc3545'" :
+                 s.status === "completado" ? "style='background:rgba(25,135,84,.06);border-left:2px solid #198754'" : "";
+      const files = s.files_count != null ? `<small class="text-secondary ms-2">${s.files_count} archivos</small>` : "";
+      return `<div class="d-flex align-items-start gap-2 mb-1 py-1 px-2 rounded" ${bg}>
+        <i class="bi bi-${icon} mt-1 ${color}"></i>
+        <div class="flex-grow-1">
+          <span class="small ${color}">${s.name || ""}</span>${vulns}${files}
+          ${err}
+        </div>
+      </div>`;
+    }).join("") + `</div>` : "";
+
+    // Frameworks badges
+    const fws = Array.isArray(data.frameworks) ? data.frameworks : [];
+    const fwLabels = { owasp: "OWASP Top 10", nist_csf: "NIST CSF", nist_800_82: "NIST SP 800-82", iso_27001: "ISO 27001", cis: "CIS Controls", mitre_attck: "MITRE ATT&CK" };
+    const fwHtml = fws.length ? fws.map(f => `<span class="badge bg-secondary-subtle text-secondary small">${fwLabels[f] || f}</span>`).join(" ") : "";
+
+    // Actions
+    let actionsHtml = "";
+    if (data.estado === "completada") {
+      actionsHtml = `<button class="btn btn-sm btn-outline-success flex-grow-1" onclick="closeAuditDetail()"><i class="bi bi-check-lg me-1"></i>Cerrar</button>`;
+    } else if (data.estado === "fallida") {
+      actionsHtml = `<button class="btn btn-sm btn-outline-danger flex-grow-1" onclick="closeAuditDetail()"><i class="bi bi-x me-1"></i>Cerrar</button>
+        <button class="btn btn-sm btn-outline-warning" onclick="showRetryAudit(${auditId})"><i class="bi bi-arrow-clockwise me-1"></i>Reintentar</button>`;
+    }
+
+    // Assemble full HTML
+    view.innerHTML = `
+      ${statusHtml}
+      ${barHtml}
+      ${errorBarHtml}
+      ${sevHtml}
+      ${currentStep}
+      ${msgHtml ? `<div class="mb-2">${msgHtml}</div>` : ""}
+      ${logHtml}
+      ${fwHtml ? `<div class="mb-2"><small class="text-secondary fw-semibold d-block mb-1">Frameworks</small>${fwHtml}</div>` : ""}
+      ${actionsHtml ? `<div class="d-flex gap-2 mt-3">${actionsHtml}</div>` : ""}
+    `;
+
+    if (done) stopPolling();
   } catch (err) {
     stopPolling();
-    document.getElementById("audit-detail-body").innerHTML = `<p class="text-danger small">${err.message}</p>`;
+    document.getElementById("audit-detail-body").innerHTML = `<div class="alert alert-danger py-2 small mb-0"><i class="bi bi-exclamation-triangle me-1"></i>${err.message}</div>`;
   }
 }
 
 function closeAuditDetail() {
   bootstrap.Modal.getInstance(document.getElementById("audit-detail-modal"))?.hide();
+}
+
+async function showRetryAudit(auditId) {
+  closeAuditDetail();
+  try {
+    await api("POST", `/audits/reset-stuck`);
+    const audit = (await api("GET", "/audits/")).find(a => a.id === auditId);
+    if (audit) {
+      await api("POST", "/audits/", {
+        proyecto_id: audit.proyecto_id,
+        nombre: audit.nombre,
+        git_url: audit.git_url,
+        frameworks: audit.frameworks,
+      });
+      alert("Nueva auditoría creada.");
+      location.hash = "/audits";
+    }
+  } catch (err) { alert(err.message); }
 }
 
 // ---------- PROFILE ----------
@@ -471,6 +546,103 @@ async function renderProfile(ct) {
   document.getElementById("loading-screen").classList.add("d-none");
 }
 
+// ---------- ADMIN ----------
+async function renderAdmin(ct) {
+  ct.innerHTML = document.getElementById("tpl-admin").innerHTML;
+  document.getElementById("admin-tabs").addEventListener("click", (e) => {
+    const tab = e.target.closest("[data-tab]");
+    if (!tab) return;
+    e.preventDefault();
+    document.querySelectorAll("#admin-tabs .nav-link").forEach(a => a.classList.remove("active"));
+    tab.classList.add("active");
+    document.getElementById("admin-users").classList.toggle("d-none", tab.dataset.tab !== "users");
+    document.getElementById("admin-roles").classList.toggle("d-none", tab.dataset.tab !== "roles");
+    if (tab.dataset.tab === "users") renderAdminUsers();
+    if (tab.dataset.tab === "roles") renderAdminRoles();
+  });
+  renderAdminUsers();
+  renderAdminRoles();
+  document.getElementById("loading-screen").classList.add("d-none");
+}
+
+async function renderAdminUsers() {
+  try {
+    const users = await api("GET", "/auth/users");
+    document.getElementById("admin-users-list").innerHTML = users.map(u => fillTpl(document.getElementById("tpl-admin-user-row").innerHTML, u)).join("");
+  } catch (err) {
+    document.getElementById("admin-users-list").innerHTML = `<p class="text-danger small">${err.message}</p>`;
+  }
+}
+
+async function renderAdminRoles() {
+  try {
+    const roles = await api("GET", "/auth/roles");
+    document.getElementById("admin-roles-list").innerHTML = roles.map(r => fillTpl(document.getElementById("tpl-admin-role-row").innerHTML, r)).join("");
+  } catch (err) {
+    document.getElementById("admin-roles-list").innerHTML = `<p class="text-danger small">${err.message}</p>`;
+  }
+}
+
+function showAdminNewUser() {
+  const username = prompt("Nombre de usuario:");
+  if (!username) return;
+  const email = prompt("Email:");
+  if (!email) return;
+  const password = prompt("Contraseña (mín 8 caracteres):");
+  if (!password || password.length < 8) return alert("Mínimo 8 caracteres");
+  api("POST", "/auth/users", { username, email, password }).then(() => renderAdminUsers()).catch(err => alert(err.message));
+}
+
+function showAdminNewRole() {
+  const nombre = prompt("Nombre del rol:");
+  if (!nombre) return;
+  const descripcion = prompt("Descripción:");
+  const permisosStr = prompt("Permisos (separados por coma, ej: audits:read,projects:write):");
+  const permisos = permisosStr ? permisosStr.split(",").map(s => s.trim()).filter(Boolean) : [];
+  api("POST", "/auth/roles", { nombre, descripcion, permisos }).then(() => renderAdminRoles()).catch(err => alert(err.message));
+}
+
+async function adminDeleteUser(userId) {
+  if (!confirm("¿Eliminar este usuario?")) return;
+  try {
+    await api("DELETE", `/auth/users/${userId}`);
+    renderAdminUsers();
+  } catch (err) { alert(err.message); }
+}
+
+async function adminDeleteRole(roleId) {
+  if (!confirm("¿Eliminar este rol?")) return;
+  try {
+    await api("DELETE", `/auth/roles/${roleId}`);
+    renderAdminRoles();
+  } catch (err) { alert(err.message); }
+}
+
+async function adminDeleteProject(projectId) {
+  if (!confirm("¿Eliminar este proyecto? Se borrará de la base de datos y el almacenamiento.")) return;
+  try {
+    await api("DELETE", `/projects/${projectId}`);
+    window._projects = await api("GET", "/projects");
+    renderProjectList();
+  } catch (err) { alert(err.message); }
+}
+
+async function adminDeleteAudit(auditId) {
+  if (!confirm("¿Eliminar esta auditoría?")) return;
+  try {
+    await api("DELETE", `/audits/${auditId}`);
+    renderAudits(document.getElementById("page-content"));
+  } catch (err) { alert(err.message); }
+}
+
+async function adminResetStuck() {
+  if (!confirm("¿Resetear auditorías atascadas (ejecutando > 1 hora)?")) return;
+  try {
+    const r = await api("POST", "/audits/reset-stuck");
+    alert(r.message);
+  } catch (err) { alert(err.message); }
+}
+
 // ---------- UTILS ----------
 function fillTpl(tpl, data) {
   let h = tpl;
@@ -489,6 +661,9 @@ function fillTpl(tpl, data) {
     try {
       USER = await api("GET", "/auth/me");
       document.getElementById("sidebar-user").textContent = USER.username;
+      if (USER.rol_nombre === "admin" || USER.rol?.nombre === "admin") {
+        document.getElementById("nav-admin").classList.remove("d-none");
+      }
       if (location.hash) hashRoute();
       else location.hash = "/";
       return;

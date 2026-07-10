@@ -80,6 +80,7 @@
         <li><a class="nav-link" href="#/projects"><i class="bi bi-folder me-2"></i><span>Proyectos</span></a></li>
         <li><a class="nav-link" href="#/audits"><i class="bi bi-shield me-2"></i><span>Auditorías</span></a></li>
         <li><a class="nav-link" href="#/profile"><i class="bi bi-person me-2"></i><span>Perfil</span></a></li>
+        <li><a class="nav-link d-none" href="#/admin" id="nav-admin"><i class="bi bi-gear me-2"></i><span>Admin</span></a></li>
       </ul>
       <hr>
       <div class="dropdown">
@@ -184,8 +185,8 @@
 
 <template id="tpl-project-card">
   <div class="col-md-6 col-lg-4">
-    <div class="card h-100 project-card" onclick="showProjectDetail('{id}')">
-      <div class="card-body p-3">
+    <div class="card h-100 project-card">
+      <div class="card-body p-3" onclick="showProjectDetail('{id}')" style="cursor:pointer">
         <h6 class="card-title mb-1"><i class="bi bi-journal-code me-1 text-primary"></i>{nombre}</h6>
         <p class="small text-secondary mb-2">{descripcion}</p>
         <div class="d-flex justify-content-between align-items-center">
@@ -195,7 +196,10 @@
       </div>
       <div class="card-footer p-2 d-flex justify-content-between">
         <small class="text-secondary">{created_at|raw}</small>
-        <small class="text-secondary"><i class="bi bi-shield me-1"></i>{auditorias_count}</small>
+        <div>
+          <small class="text-secondary me-2"><i class="bi bi-shield me-1"></i>{auditorias_count}</small>
+          <button class="btn btn-sm btn-outline-danger py-0 px-1 admin-only d-none" onclick="event.stopPropagation();adminDeleteProject('{id}')" title="Eliminar"><i class="bi bi-trash"></i></button>
+        </div>
       </div>
     </div>
   </div>
@@ -218,15 +222,17 @@
 </template>
 
 <template id="tpl-audit-row">
-  <div class="card mb-2 audit-row" onclick="showAuditDetail('{id}')" style="cursor:pointer">
-    <div class="card-body p-3 d-flex justify-content-between align-items-center">
-      <div>
-        <h6 class="mb-1 small"><i class="bi bi-bug me-1 text-primary"></i>{nombre}</h6>
-        <small class="text-secondary">Proyecto: <span class="text-light">{proyecto_nombre}</span> &middot; {tipo}</small>
+  <div class="card mb-2 audit-row">
+    <div class="card-body p-3 d-flex justify-content-between align-items-center" onclick="showAuditDetail('{id}')" style="cursor:pointer">
+      <div class="overflow-hidden" style="min-width:0">
+        <h6 class="mb-1 small text-truncate"><i class="bi bi-bug me-1 text-primary"></i>{nombre}</h6>
+        <small class="text-secondary text-truncate d-block">Proyecto: <span class="text-light">{proyecto_nombre}</span> &middot; {tipo}</small>
+        {error_msg}
       </div>
-      <div class="text-end d-flex align-items-center gap-2">
+      <div class="text-end d-flex align-items-center gap-2 flex-shrink-0">
         <span class="badge bg-{estado_color} small">{estado}</span>
-        <small class="d-block text-secondary mt-1">{created_at|raw}</small>
+        <small class="d-block text-secondary">{created_at|raw}</small>
+        <button class="btn btn-sm btn-outline-danger py-0 px-1 admin-only d-none" onclick="event.stopPropagation();adminDeleteAudit('{id}')" title="Eliminar"><i class="bi bi-trash"></i></button>
         <i class="bi bi-chevron-right text-secondary"></i>
       </div>
     </div>
@@ -234,28 +240,75 @@
 </template>
 
 <template id="tpl-progress-view">
-  <div id="pv-status" class="mb-3"></div>
-  <div class="progress mb-3" style="height:8px">
-    <div id="pv-bar" class="progress-bar" role="progressbar" style="width:0%"></div>
+  <div id="pv-status" class="mb-2"></div>
+  <div class="progress mb-3" style="height:10px;border-radius:6px;background:rgba(255,255,255,.06)">
+    <div id="pv-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width:0%;transition:width .5s ease"></div>
   </div>
+  <div id="pv-error-bar" class="alert alert-danger d-none py-1 small mb-2"></div>
   <div class="row g-2 mb-3" id="pv-severity"></div>
-  <div class="d-flex justify-content-between align-items-center mb-2">
-    <small class="text-secondary fw-semibold">Pasos</small>
+  <div class="d-flex align-items-center gap-2 mb-2">
+    <div id="pv-current-step" class="badge bg-info-subtle text-info px-2 py-1 small d-none"><i class="bi bi-arrow-repeat me-1"></i><span></span></div>
     <small id="pv-message" class="text-secondary"></small>
   </div>
-  <div id="pv-steps" class="mb-3"></div>
+  <div id="pv-log" class="mb-3" style="max-height:320px;overflow-y:auto"></div>
   <div class="d-flex justify-content-between align-items-center mb-2">
-    <small class="text-secondary fw-semibold">Frameworks</small>
+    <small class="text-secondary fw-semibold">Frameworks evaluados</small>
   </div>
   <div id="pv-frameworks" class="d-flex flex-wrap gap-1 mb-3"></div>
   <div id="pv-actions" class="d-flex gap-2"></div>
 </template>
 
-<template id="tpl-step-item">
-  <div class="d-flex align-items-center gap-2 mb-1 py-1 px-2 rounded step-{status}">
-    <i class="bi bi-{icon} step-icon"></i>
-    <span class="small flex-grow-1">{name}</span>
-    {extra}
+<template id="tpl-admin">
+  <h6 class="fw-normal mb-3"><i class="bi bi-gear me-2"></i>Administración</h6>
+  <ul class="nav nav-tabs small mb-3" id="admin-tabs">
+    <li class="nav-item"><a class="nav-link active" data-tab="users" href="#">Usuarios</a></li>
+    <li class="nav-item"><a class="nav-link" data-tab="roles" href="#">Roles</a></li>
+  </ul>
+  <div id="admin-users">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <small class="text-secondary fw-semibold">Usuarios</small>
+      <button class="btn btn-primary btn-sm" onclick="showAdminNewUser()"><i class="bi bi-plus-lg"></i> Nuevo</button>
+    </div>
+    <div id="admin-users-list"></div>
+  </div>
+  <div id="admin-roles" class="d-none">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <small class="text-secondary fw-semibold">Roles</small>
+      <button class="btn btn-primary btn-sm" onclick="showAdminNewRole()"><i class="bi bi-plus-lg"></i> Nuevo</button>
+    </div>
+    <div id="admin-roles-list"></div>
+  </div>
+  <hr>
+  <div class="d-flex gap-2">
+    <button class="btn btn-outline-warning btn-sm" onclick="adminResetStuck()"><i class="bi bi-arrow-clockwise me-1"></i>Resetear auditorías atascadas</button>
+  </div>
+</template>
+
+<template id="tpl-admin-user-row">
+  <div class="card mb-1">
+    <div class="card-body p-2 d-flex justify-content-between align-items-center">
+      <div>
+        <strong class="small">{username}</strong>
+        <small class="text-secondary d-block">{email} &middot; {rol_nombre}</small>
+      </div>
+      <div class="d-flex gap-1">
+        <button class="btn btn-sm btn-outline-danger" onclick="adminDeleteUser('{id}')" title="Eliminar"><i class="bi bi-trash"></i></button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-admin-role-row">
+  <div class="card mb-1">
+    <div class="card-body p-2 d-flex justify-content-between align-items-center">
+      <div>
+        <strong class="small">{nombre}</strong>
+        <small class="text-secondary d-block">{descripcion}</small>
+      </div>
+      <div class="d-flex gap-1">
+        <button class="btn btn-sm btn-outline-danger" onclick="adminDeleteRole('{id}')" title="Eliminar"><i class="bi bi-trash"></i></button>
+      </div>
+    </div>
   </div>
 </template>
 
