@@ -5,9 +5,10 @@ import hashlib
 import asyncio
 import datetime
 import logging
+from urllib.parse import urlparse
 from git import Repo
 from typing import Optional
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 from app.projects.models import Proyecto, ArchivoProyecto
@@ -64,15 +65,31 @@ class AuditOrchestrator:
 
     async def _update_progress(self, audit: Auditoria, percentage: int, steps: list,
                                 message: str, vulns_found: int = 0):
-        raw = audit.resultado_resumen if isinstance(audit.resultado_resumen, dict) else {}
-        raw["progress"] = {
+        import json
+        progress = {
             "percentage": percentage,
             "steps": steps,
             "message": message,
             "vulnerabilities_found": vulns_found,
         }
-        audit.resultado_resumen = raw
+        audit.resultado_resumen = {"progress": progress}
+        await self.db.execute(
+            text("UPDATE sc_auditorias SET resultado_resumen = :val WHERE id = :id"),
+            {"val": json.dumps(audit.resultado_resumen), "id": audit.id},
+        )
         await self.db.commit()
+
+    @staticmethod
+    def _build_auth_url(git_url: str, username: str, token: str) -> str:
+        if not token:
+            return git_url
+        parsed = urlparse(git_url)
+        if parsed.scheme != "https":
+            return git_url
+        auth_netloc = f"{username}:{token}@{parsed.hostname}"
+        if parsed.port:
+            auth_netloc += f":{parsed.port}"
+        return parsed._replace(netloc=auth_netloc).geturl()
 
     async def _clone_and_load_files(self, audit: Auditoria, project: Proyecto) -> list[ArchivoProyecto]:
         existing = await self.project_service.get_project_files(project.id)
@@ -83,11 +100,18 @@ class AuditOrchestrator:
         if not git_url:
             return []
 
+        auth_url = self._build_auth_url(git_url, audit.git_username or "", audit.git_token or "")
+
         loop = asyncio.get_event_loop()
         clone_dir = tempfile.mkdtemp(prefix=f"sc_clone_{project.id}_")
         try:
-            logger.info(f"Clonando {git_url} en {clone_dir}")
-            await loop.run_in_executor(None, lambda: Repo.clone_from(git_url, clone_dir, depth=1))
+            log_url = git_url.split("@")[-1] if "@" in git_url else git_url
+            logger.info(f"Clonando {log_url} en {clone_dir}")
+            await loop.run_in_executor(None, lambda: Repo.clone_from(auth_url, clone_dir, depth=1))
+
+            if audit.git_token:
+                audit.git_token = None
+                await self.db.commit()
 
             detector = LanguageDetector()
             created = []
@@ -228,11 +252,24 @@ class AuditOrchestrator:
 
             if ai_idx < n_workers + n_extra:
                 steps_status[ai_idx]["status"] = "ejecutando"
+                n_vulns = len(all_vulns)
+
+                async def report_ai_progress(idx, total, vtype, archivo):
+                    pct = 92 + int((idx / total) * 5)
+                    steps_status[ai_idx]["detail"] = f"{vtype} en {archivo}"
+                    await self._update_progress(
+                        audit, pct, steps_status,
+                        f"Analizando con IA ({idx+1}/{total}): {vtype} en {archivo}",
+                        n_vulns,
+                    )
+
                 await self._update_progress(
                     audit, 92, steps_status,
-                    "Analizando vulnerabilidades con IA...", len(all_vulns),
+                    f"Analizando vulnerabilidades con IA (0/{n_vulns})...", n_vulns,
                 )
-                ai_analysis = await self.ai_analyzer.analyze_vulnerabilities(all_vulns)
+                ai_analysis = await self.ai_analyzer.analyze_vulnerabilities(
+                    all_vulns, progress_callback=report_ai_progress,
+                )
                 steps_status[ai_idx]["status"] = "completado"
 
             # Compliance
@@ -261,6 +298,7 @@ class AuditOrchestrator:
             audit.estado = "completada"
             audit.completed_at = datetime.datetime.utcnow()
             audit.resultado_resumen = {
+                "reports": {},
                 "total_vulnerabilities": len(vulnerabilities),
                 "critical": sum(1 for v in vulnerabilities if v.cvss_score and v.cvss_score >= 9.0),
                 "high": sum(1 for v in vulnerabilities if v.cvss_score and 7.0 <= v.cvss_score < 9.0),

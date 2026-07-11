@@ -49,12 +49,13 @@ class OWASPRules:
         matched = []
         for vuln_type, mappings in knowledge_base.items():
             for mapping in mappings:
-                for _, category in mapping.items():
-                    if isinstance(category, str) and category.startswith("A0") and ":2021" in category:
-                        matched.append({
-                            "vulnerabilidad": vuln_type,
-                            "categoria_owasp": category,
-                        })
+                if isinstance(mapping, dict):
+                    for _, category in mapping.items():
+                        if isinstance(category, str) and category.startswith("A0") and ":2021" in category:
+                            matched.append({
+                                "vulnerabilidad": vuln_type,
+                                "categoria_owasp": category,
+                            })
 
         found_categories = set(m["categoria_owasp"] for m in matched)
         total_categories = len(categories)

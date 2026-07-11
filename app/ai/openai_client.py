@@ -28,29 +28,11 @@ class OpenAIClient:
             logger.error(f"OpenAI API error: {str(e)}")
             raise
 
-    async def analyze_vulnerability(self, vuln_data: dict) -> dict:
-        from app.ai.prompts import VULNERABILITY_ANALYSIS_PROMPT
+    async def combined_analysis(self, vuln_data: dict) -> dict:
+        from app.ai.prompts import COMBINED_ANALYSIS_PROMPT
         messages = [
-            {"role": "system", "content": VULNERABILITY_ANALYSIS_PROMPT},
-            {"role": "user", "content": f"Analiza la siguiente vulnerabilidad:\n{vuln_data}"},
-        ]
-        result = await self.chat_completion(messages)
-        return self._parse_json_response(result)
-
-    async def generate_fix(self, vuln_data: dict) -> dict:
-        from app.ai.prompts import CODE_FIX_PROMPT
-        messages = [
-            {"role": "system", "content": CODE_FIX_PROMPT},
-            {"role": "user", "content": f"Genera el código corregido para:\n{vuln_data}"},
-        ]
-        result = await self.chat_completion(messages)
-        return self._parse_json_response(result)
-
-    async def analyze_compliance(self, vuln_data: dict) -> list:
-        from app.ai.prompts import COMPLIANCE_MAPPING_PROMPT
-        messages = [
-            {"role": "system", "content": COMPLIANCE_MAPPING_PROMPT},
-            {"role": "user", "content": f"Mapea esta vulnerabilidad a estándares:\n{vuln_data}"},
+            {"role": "system", "content": COMBINED_ANALYSIS_PROMPT},
+            {"role": "user", "content": f"Analiza esta vulnerabilidad:\n{vuln_data}"},
         ]
         result = await self.chat_completion(messages)
         return self._parse_json_response(result)

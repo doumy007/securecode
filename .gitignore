@@ -47,3 +47,6 @@ htmlcov/
 
 # MinIO data
 minio-data/
+
+# Uploaded project files
+storage/

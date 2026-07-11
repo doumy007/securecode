@@ -1,3 +1,4 @@
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
 from app.config import settings
@@ -34,6 +35,12 @@ async def init_db():
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        async with engine.begin() as conn:
+            for col, col_type in [("git_username", "VARCHAR(255)"), ("git_token", "VARCHAR(512)"), ("nombre", "VARCHAR(255)"), ("tipo", "VARCHAR(20)"), ("frameworks", "JSON"), ("git_url", "VARCHAR(1024)")]:
+                try:
+                    await conn.execute(text(f"ALTER TABLE sc_auditorias ADD COLUMN {col} {col_type}"))
+                except Exception:
+                    pass
     except Exception as e:
         import logging
         logging.getLogger("securecode").warning(f"init_db (no crítico): {e}")

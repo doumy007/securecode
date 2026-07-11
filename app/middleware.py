@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 from app.config import settings
+from app.exceptions import SecureCodeException
 
 logger = logging.getLogger("securecode")
 
@@ -27,6 +28,12 @@ class ExceptionMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         except HTTPException:
             raise
+        except SecureCodeException as e:
+            logger.warning(f"SecureCodeException: {e.message} (code={e.code})")
+            return JSONResponse(
+                status_code=e.status_code,
+                content={"detail": e.message, "code": e.code},
+            )
         except Exception as e:
             logger.exception(f"Unhandled error: {str(e)}")
             return JSONResponse(

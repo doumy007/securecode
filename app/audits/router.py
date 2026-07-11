@@ -1,7 +1,10 @@
 import asyncio
+import json
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List, Optional
+from typing import List, Optional, Set
 from app.database import get_db, async_session_factory
 from app.audits.service import AuditService
 from app.audits.schemas import (
@@ -10,8 +13,13 @@ from app.audits.schemas import (
 )
 from app.dependencies import get_current_active_user, require_role
 from app.auth.models import Usuario
+from app.ai.analyzer import AIAnalyzer
+
+logger = logging.getLogger("securecode.audit")
 
 router = APIRouter()
+
+_background_tasks: Set[asyncio.Task] = set()
 
 
 @router.post("/", response_model=AuditoriaResponse, status_code=status.HTTP_201_CREATED)
@@ -27,18 +35,24 @@ async def create_audit(
         nombre=data.nombre,
         frameworks=data.frameworks,
         git_url=data.git_url,
+        git_username=data.git_username,
+        git_token=data.git_token,
     )
 
     async def run_background():
         async with async_session_factory() as bg_db:
             bg_service = AuditService(bg_db)
             try:
+                logger.info("Background audit %s started", audit.id)
                 await bg_service.run_audit_async(audit.id)
-            except Exception:
-                pass
+                logger.info("Background audit %s finished", audit.id)
+            except Exception as e:
+                logger.exception("Background audit %s failed: %s", audit.id, e)
             await bg_db.commit()
 
-    asyncio.create_task(run_background())
+    task = asyncio.create_task(run_background())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
     nombre_proyecto = await service.get_proyecto_nombre(audit.proyecto_id)
     return AuditoriaResponse(
@@ -247,6 +261,75 @@ async def list_frameworks():
         {"id": "cis", "label": "CIS Controls v8", "desc": "Controles de seguridad críticos"},
         {"id": "mitre_attck", "label": "MITRE ATT&CK", "desc": "Tácticas y técnicas adversariales"},
     ]
+
+
+@router.get("/{audit_id}/report/{framework}")
+async def get_framework_report(
+    audit_id: int,
+    framework: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(get_current_active_user),
+):
+    service = AuditService(db)
+    audit = await service.get_audit(audit_id)
+
+    fw_list = audit.frameworks or []
+    if isinstance(fw_list, str):
+        try: fw_list = json.loads(fw_list)
+        except: fw_list = []
+    if framework not in fw_list:
+        raise HTTPException(status_code=400, detail=f"Framework '{framework}' no seleccionado en esta auditoría")
+
+    raw = audit.resultado_resumen
+    if isinstance(raw, str):
+        try: raw = json.loads(raw)
+        except: raw = {}
+    elif raw is None:
+        raw = {}
+    reports_cache = raw.get("reports", {}) if isinstance(raw, dict) else {}
+    cached = reports_cache.get(framework)
+    if cached:
+        return cached
+
+    vulns_orm = await service.get_audit_vulnerabilities(audit_id)
+    project = audit.proyecto
+    findings = []
+    for v in vulns_orm:
+        findings.append({
+            "tipo": v.tipo,
+            "archivo": v.archivo.ruta if v.archivo else None,
+            "linea_inicio": v.linea_inicio,
+            "linea_fin": v.linea_fin,
+            "descripcion": v.descripcion,
+            "severidad": v.severidad,
+            "cvss_score": v.cvss_score,
+            "codigo_vulnerable": v.codigo_vulnerable,
+            "codigo_corregido": v.codigo_corregido,
+            "recomendacion": v.recomendacion,
+            "mapeos": [{"estandar": m.estandar, "categoria": m.categoria, "referencia": m.referencia} for m in v.mapeos] if v.mapeos else [],
+        })
+
+    project_info = {
+        "id": project.id,
+        "nombre": project.nombre if project else "—",
+    }
+    audit_info = {
+        "id": audit.id,
+        "fecha": audit.created_at.isoformat() if audit.created_at else "",
+    }
+
+    ai = AIAnalyzer()
+    report = await ai.generate_framework_report(framework, audit_info, findings, project_info)
+
+    raw["reports"] = raw.get("reports", {})
+    raw["reports"][framework] = report
+    await db.execute(
+        text("UPDATE sc_auditorias SET resultado_resumen = :val WHERE id = :id"),
+        {"val": json.dumps(raw), "id": audit.id},
+    )
+    await db.commit()
+
+    return report
 
 
 @router.get("/summary", response_model=dict)

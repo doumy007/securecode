@@ -134,7 +134,9 @@
           <div class="mb-2"><label class="text-secondary small">Proyecto</label>
             <select class="form-select" id="audit-proyecto" required><option value="">Seleccionar...</option></select></div>
           <div class="mb-2"><label class="text-secondary small">Nombre</label><input class="form-control" id="audit-nombre" placeholder="Auditoría automatizada"></div>
-          <div class="mb-2"><label class="text-secondary small">URL Git (opcional)</label><input class="form-control" id="audit-git" placeholder="https://github.com/usuario/repo.git"></div>
+          <div class="mb-2"><label class="text-secondary small">URL Git</label><input class="form-control" id="audit-git" placeholder="https://github.com/usuario/repo.git"></div>
+          <div class="mb-2"><label class="text-secondary small">Email (Git)</label><input class="form-control" id="audit-git-username" placeholder="email@ejemplo.com"></div>
+          <div class="mb-2"><label class="text-secondary small">Token / Contraseña</label><input type="password" class="form-control" id="audit-git-token" placeholder="ghp_xxxx o contraseña"></div>
           <div class="mb-2">
             <label class="text-secondary small d-block mb-1">Frameworks</label>
             <div id="framework-checks" class="d-flex flex-wrap gap-2"></div>
@@ -258,6 +260,48 @@
   <div id="pv-actions" class="d-flex gap-2"></div>
 </template>
 
+<template id="tpl-report">
+  <div id="rp-summary" class="mb-3"></div>
+  <div id="rp-grouped" class="mb-3"></div>
+  <div class="d-flex gap-2" id="rp-actions"></div>
+</template>
+
+<template id="tpl-report-group">
+  <div class="card mb-2">
+    <div class="card-header p-2 d-flex justify-content-between align-items-center" style="cursor:pointer" onclick="toggleReportGroup(this)">
+      <small class="fw-semibold">{tipo}</small>
+      <div>
+        <span class="badge bg-{severityColor} me-2">{severityLabel}</span>
+        <span class="badge bg-secondary-subtle text-secondary">{count}</span>
+        <i class="bi bi-chevron-down ms-2 small text-secondary rp-chevron"></i>
+      </div>
+    </div>
+    <div class="rp-group-body" style="display:none">
+      {items}
+    </div>
+  </div>
+</template>
+
+<template id="tpl-report-item">
+  <div class="p-2 border-bottom border-secondary-subtle">
+    <div class="d-flex justify-content-between align-items-start">
+      <div class="flex-grow-1" style="min-width:0">
+        <small class="text-secondary d-block"><i class="bi bi-file-earmark-code me-1"></i>{archivo_ruta}</small>
+        <small class="d-block text-info">Línea {line_range}</small>
+        <small class="d-block mt-1">{descripcion}</small>
+        {codigo_vulnerable_html}
+        {codigo_corregido_html}
+        {recomendacion_html}
+        {mapeos_html}
+        <small class="text-secondary-emphasis d-block mt-1">
+          <span class="badge bg-{severidadBadge} me-1">{cvss_score}</span>
+          Impacto: {impacto} | Probabilidad: {probabilidad}
+        </small>
+      </div>
+    </div>
+  </div>
+</template>
+
 <template id="tpl-admin">
   <h6 class="fw-normal mb-3"><i class="bi bi-gear me-2"></i>Administración</h6>
   <ul class="nav nav-tabs small mb-3" id="admin-tabs">
@@ -309,6 +353,19 @@
         <button class="btn btn-sm btn-outline-danger" onclick="adminDeleteRole('{id}')" title="Eliminar"><i class="bi bi-trash"></i></button>
       </div>
     </div>
+  </div>
+</template>
+
+<template id="tpl-framework-report">
+  <div id="fw-report-container">
+    <div id="fw-report-summary" class="mb-3"></div>
+    <div id="fw-report-executive" class="mb-3"></div>
+    <div id="fw-report-controls" class="mb-3"></div>
+    <div id="fw-report-findings" class="mb-3"></div>
+    <div id="fw-report-risk" class="mb-3"></div>
+    <div id="fw-report-plan" class="mb-3"></div>
+    <div id="fw-report-checklist" class="mb-3"></div>
+    <div id="fw-report-actions" class="d-flex gap-2 mt-3"></div>
   </div>
 </template>
 

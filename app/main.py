@@ -24,9 +24,22 @@ logger = logging.getLogger("securecode")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"Iniciando {settings.APP_NAME} v{settings.APP_VERSION}")
-    from app.database import init_db
+    from app.database import init_db, async_session_factory
     await init_db()
     logger.info("Base de datos inicializada")
+    async with async_session_factory() as startup_db:
+        from sqlalchemy import select
+        from app.audits.models import Auditoria
+        result = await startup_db.execute(
+            select(Auditoria).where(Auditoria.estado == "ejecutando")
+        )
+        stuck = result.scalars().all()
+        for a in stuck:
+            a.estado = "fallida"
+            logger.info("Auditoría %s marcada como fallida por reinicio del servidor", a.id)
+        if stuck:
+            await startup_db.commit()
+            logger.info("%s auditorías atascadas reseteadas", len(stuck))
     yield
     logger.info("Apagando servidor")
 

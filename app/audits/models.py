@@ -32,6 +32,8 @@ class Auditoria(Base):
     resultado_resumen = Column(JSON)
     frameworks = Column(JSON)
     git_url = Column(String(1024))
+    git_username = Column(String(255))
+    git_token = Column(String(512))
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     completed_at = Column(DateTime)
 

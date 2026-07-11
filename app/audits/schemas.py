@@ -8,6 +8,8 @@ class AuditoriaCreate(BaseModel):
     nombre: Optional[str] = None
     frameworks: Optional[List[str]] = None
     git_url: Optional[str] = None
+    git_username: Optional[str] = None
+    git_token: Optional[str] = None
 
 
 class AuditoriaResponse(BaseModel):
@@ -21,6 +23,7 @@ class AuditoriaResponse(BaseModel):
     resultado_resumen: Optional[dict] = None
     frameworks: Optional[list] = None
     git_url: Optional[str] = None
+    git_username: Optional[str] = None
     created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     vulnerabilities_count: Optional[int] = None

@@ -16,6 +16,8 @@ class AuditService:
     async def create_audit(self, proyecto_id: int, user_id: int,
                            frameworks: Optional[list] = None,
                            git_url: Optional[str] = None,
+                           git_username: Optional[str] = None,
+                           git_token: Optional[str] = None,
                            nombre: Optional[str] = None) -> Auditoria:
         audit = Auditoria(
             proyecto_id=proyecto_id,
@@ -24,6 +26,8 @@ class AuditService:
             estado=EstadoAuditoria.PENDIENTE.value,
             frameworks=frameworks or ["owasp", "nist_csf", "iso_27001", "cis", "mitre_attck"],
             git_url=git_url,
+            git_username=git_username,
+            git_token=git_token,
         )
         self.db.add(audit)
         await self.db.commit()
