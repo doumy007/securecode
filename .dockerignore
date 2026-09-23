@@ -1,0 +1,69 @@
+# ============================================================
+# SecureCode AI - .dockerignore
+# Evita que secretos y basura entren en la imagen Docker.
+# CRÍTICO: .env contiene credenciales reales y NUNCA debe
+# quedar horneado dentro de una imagen.
+# ============================================================
+
+# --- Secretos y entorno (NUNCA en la imagen) ---
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+*.pem
+*.key
+id_rsa
+
+# --- Git ---
+.git/
+.gitignore
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# --- Datos de runtime (se montan como volúmenes) ---
+storage/
+uploads/
+reports/
+minio-data/
+*.db
+*.sqlite3
+
+# --- Logs y tests ---
+*.log
+logs/
+.coverage
+htmlcov/
+.pytest_cache/
+tests/
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- Documentación y despliegue (no necesarios en runtime) ---
+*.md
+docs/
+.docker/
+kubernetes/
+.github/
+Makefile
+
+# --- Dockerfiles y compose (no necesarios dentro de la imagen) ---
+Dockerfile
+Dockerfile.worker
+docker-compose*.yml

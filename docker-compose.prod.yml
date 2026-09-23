@@ -1,0 +1,152 @@
+# ============================================================
+# SecureCode AI - Compose de PRODUCCIÓN (standalone)
+# Uso: docker compose -f docker-compose.prod.yml up -d --build
+#
+# - La API queda expuesta en el puerto 1200 del host
+#   (mapeo 1200 -> 8000 interno del contenedor).
+# - Los puertos internos de datos (MySQL, Redis, AMQP, MinIO S3)
+#   NO se publican al host por seguridad; solo consolas web.
+# - Requiere un archivo .env junto a este fichero (ver README.md).
+# ============================================================
+
+name: securecode
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: securecode-api:1.0.0
+    container_name: sc-api
+    ports:
+      - "1200:8000"
+    environment:
+      - APP_ENV=production
+      - APP_DEBUG=false
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - RABBITMQ_HOST=rabbitmq
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=minio:9000
+    env_file:
+      - .env
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./uploads:/app/uploads
+      - ./reports:/app/reports
+    restart: unless-stopped
+    networks:
+      - securecode-network
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: securecode-worker:1.0.0
+    container_name: sc-worker
+    environment:
+      - APP_ENV=production
+      - APP_DEBUG=false
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - RABBITMQ_HOST=rabbitmq
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=minio:9000
+    env_file:
+      - .env
+    depends_on:
+      - api
+      - rabbitmq
+    restart: unless-stopped
+    networks:
+      - securecode-network
+
+  mysql:
+    image: mysql:8.0
+    container_name: sc-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${DB_NAME:-securecode_db}
+      MYSQL_USER: ${DB_USER:-securecode}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-securecode_pass}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - securecode-network
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: sc-rabbitmq
+    ports:
+      - "15672:15672" # Consola de gestión (opcional, cerrar en firewall si no se usa)
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - securecode-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: sc-redis
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - securecode-network
+
+  minio:
+    image: minio/minio
+    container_name: sc-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9001:9001" # Consola web MinIO (opcional)
+    volumes:
+      - minio_data:/data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    restart: unless-stopped
+    networks:
+      - securecode-network
+
+  sonarqube:
+    image: sonarqube:community
+    container_name: sc-sonarqube
+    ports:
+      - "9002:9000" # Consola SonarQube (opcional, pesado: ver README)
+    environment:
+      - SONAR_JDBC_URL=jdbc:mysql://mysql:3306/sonar?useUnicode=true&characterEncoding=utf8
+      - SONAR_JDBC_USERNAME=${DB_USER:-securecode}
+      - SONAR_JDBC_PASSWORD=${DB_PASSWORD:-securecode_pass}
+    depends_on:
+      - mysql
+    restart: unless-stopped
+    networks:
+      - securecode-network
+
+volumes:
+  mysql_data:
+  rabbitmq_data:
+  redis_data:
+  minio_data:
+
+networks:
+  securecode-network:
+    driver: bridge
