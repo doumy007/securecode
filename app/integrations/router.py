@@ -19,16 +19,30 @@ jira = JiraIntegration()
 @router.post("/github/webhook")
 async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     payload = await request.json()
+
+    # Verificación opcional de firma (si GITHUB_WEBHOOK_SECRET está configurado)
+    if settings.GITHUB_WEBHOOK_SECRET:
+        import hashlib, hmac
+        body = await request.body()
+        signature = request.headers.get("x-hub-signature-256", "")
+        expected = "sha256=" + hmac.new(
+            settings.GITHUB_WEBHOOK_SECRET.encode(), body, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            raise HTTPException(status_code=401, detail="Firma de webhook inválida")
+
     result = await github.handle_webhook(payload)
     if result.get("trigger_audit"):
+        # Solo se encola: la auditoría se crea como 'pendiente' y la ejecuta
+        # el worker. No ejecutar aquí (bloquearía el request y duplicaría el trabajo).
         service = AuditService(db)
         project_service = ProjectService(db)
         projects = await project_service.get_all_projects()
         for p in projects:
             if p.repo_url and result.get("repo", "") in p.repo_url:
-                audit = await service.create_audit(p.id, p.user_id)
-                await service.run_audit_async(audit.id)
-                return {"message": "Auditoría iniciada", "audit_id": audit.id, **result}
+                audit = await service.create_audit(p.id, p.user_id, git_url=p.repo_url)
+                return {"message": "Auditoría encolada", "audit_id": audit.id, "estado": audit.estado, **result}
+        return {**result, "message": "No se encontró ningún proyecto con ese repositorio"}
     return result
 
 

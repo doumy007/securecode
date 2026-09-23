@@ -67,7 +67,6 @@ class AuthService:
         user = result.scalar_one_or_none()
         if user and user.rol:
             from sqlalchemy import select as sa_select
-            from app.auth.models import Rol
             r = await self.db.execute(sa_select(Rol.nombre).where(Rol.id == user.rol_id))
             row = r.scalar_one_or_none()
             user.rol_nombre = row or user.rol.nombre
@@ -92,6 +91,9 @@ class AuthService:
     async def verify_access_token(self, token: str) -> Optional[Usuario]:
         try:
             payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
+            # Un refresh token NO debe servir como access token
+            if payload.get("type") != "access":
+                return None
             user_id: int = int(payload.get("sub"))
             if user_id is None:
                 return None

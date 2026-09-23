@@ -2,15 +2,28 @@ const API = window.location.origin;
 let TOKEN = localStorage.getItem("sc_token") || null;
 let USER = null;
 let _pollInterval = null;
+let _pollInFlight = false;
+let _pollErrorShown = false;
 
 function setToken(t) { TOKEN = t; localStorage.setItem("sc_token", t); }
 function logout() { TOKEN = null; USER = null; localStorage.removeItem("sc_token"); stopPolling(); showPage("login"); }
 
-async function api(method, path, body) {
+async function api(method, path, body, timeoutMs) {
   const opts = { method, headers: { "Content-Type": "application/json" } };
   if (TOKEN) opts.headers["Authorization"] = "Bearer " + TOKEN;
   if (body) opts.body = JSON.stringify(body);
-  const r = await fetch(API + path, opts);
+  const controller = new AbortController();
+  opts.signal = controller.signal;
+  const timer = setTimeout(() => controller.abort(), timeoutMs || 30000);
+  let r;
+  try {
+    r = await fetch(API + path, opts);
+  } catch (err) {
+    if (err.name === "AbortError") throw new Error("La petición tardó demasiado (timeout). Inténtalo de nuevo.");
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!r.ok) {
     let msg = "Error " + r.status;
     try { const j = await r.json(); msg = j.detail || msg; } catch {}
@@ -402,8 +415,11 @@ async function showAuditDetail(auditId) {
 }
 
 async function refreshAuditProgress(auditId) {
+  if (_pollInFlight) return; // evita peticiones solapadas
+  _pollInFlight = true;
   try {
     const data = await api("GET", `/audits/${auditId}/progress`);
+    _pollErrorShown = false;
     const view = document.getElementById("audit-detail-body");
     const pct = data.percentage || 0;
     const done = data.estado === "completada" || data.estado === "fallida";
@@ -414,7 +430,7 @@ async function refreshAuditProgress(auditId) {
     // Status header
     const statusHtml = `<div class="d-flex justify-content-between align-items-center">
       <h6 class="mb-0 small fw-semibold">
-        <span class="badge bg-${stateColors[data.estado] || "secondary"}">${stateLabels[data.estado] || data.estado}</span>
+        <span class="badge bg-${stateColors[data.estado] || "secondary"}">${esc(stateLabels[data.estado] || data.estado)}</span>
         <span class="text-secondary ms-2">${pct}%</span>
       </h6>
       <small class="text-secondary">Auditoría #${auditId}</small>
@@ -429,7 +445,7 @@ async function refreshAuditProgress(auditId) {
 
     // Error banner
     const error = data.estado === "fallida" ? data.message || "" : "";
-    const errorBarHtml = error ? `<div class="alert alert-danger py-2 small mb-2"><i class="bi bi-exclamation-triangle me-1"></i>${error}</div>` : "";
+    const errorBarHtml = error ? `<div class="alert alert-danger py-2 small mb-2"><i class="bi bi-exclamation-triangle me-1"></i>${esc(error)}</div>` : "";
 
     // Severity cards (only show if there are vulnerabilities)
     const sev = data.severity || {};
@@ -446,11 +462,11 @@ async function refreshAuditProgress(auditId) {
     const steps = Array.isArray(data.steps) ? data.steps : [];
     const runningStep = steps.find(s => s && s.status === "ejecutando");
     if (runningStep && data.estado !== "completada" && data.estado !== "fallida") {
-      currentStep = `<div class="badge bg-info-subtle text-info px-2 py-1 small mb-2"><i class="bi bi-arrow-repeat me-1"></i>${runningStep.name || "Ejecutando..."}</div>`;
+      currentStep = `<div class="badge bg-info-subtle text-info px-2 py-1 small mb-2"><i class="bi bi-arrow-repeat me-1"></i>${esc(runningStep.name || "Ejecutando...")}</div>`;
     }
 
     // Message
-    const msgHtml = data.message ? `<small class="text-secondary">${data.message}</small>` : "";
+    const msgHtml = esc(data.message) ? `<small class="text-secondary">${esc(data.message)}</small>` : "";
 
     // Interactive accordion log - click steps to expand details
     const statusMap = { pendiente: ["circle", "text-secondary"], ejecutando: ["arrow-repeat text-info", "text-info"], completado: ["check-circle-fill text-success", "text-success"], fallido: ["x-circle-fill text-danger", "text-danger"] };
@@ -469,12 +485,12 @@ async function refreshAuditProgress(auditId) {
         <div class="d-flex align-items-start gap-2 py-1 px-2 step-header" ${bg} onclick="toggleStepDetail(this)">
           <i class="bi bi-${icon} mt-1 ${color}"></i>
           <div class="flex-grow-1">
-            <span class="small ${color}">${s.name || ""}</span>${vulnsBadge}${filesBadge}
+            <span class="small ${color}">${esc(s.name || "")}</span>${vulnsBadge}${filesBadge}
           </div>
           <i class="bi bi-chevron-down small text-secondary step-chevron"></i>
         </div>
         <div class="step-detail px-3 py-1 small text-secondary${collapsed}" style="border-left:2px solid rgba(255,255,255,.08)">
-          ${detail ? detail : (s.status === "completado" ? "Sin detalles adicionales" : "")}
+          ${detail ? esc(detail) : (s.status === "completado" ? "Sin detalles adicionales" : "")}
         </div>
       </div>`;
     }).join("") + `</div>` : "";
@@ -482,7 +498,7 @@ async function refreshAuditProgress(auditId) {
     // Frameworks badges
     const fws = Array.isArray(data.frameworks) ? data.frameworks : [];
     const fwLabels = { owasp: "OWASP Top 10", nist_csf: "NIST CSF", nist_800_82: "NIST SP 800-82", iso_27001: "ISO 27001", cis: "CIS Controls", mitre_attck: "MITRE ATT&CK" };
-    const fwHtml = fws.length ? fws.map(f => `<span class="badge bg-secondary-subtle text-secondary small">${fwLabels[f] || f}</span>`).join(" ") : "";
+    const fwHtml = fws.length ? fws.map(f => `<span class="badge bg-secondary-subtle text-secondary small">${esc(fwLabels[f] || f)}</span>`).join(" ") : "";
 
     // Actions - framework-specific report buttons
     let actionsHtml = "";
@@ -491,8 +507,8 @@ async function refreshAuditProgress(auditId) {
       const fwColors = { owasp: "danger", nist_csf: "primary", nist_800_82: "info", iso_27001: "success", cis: "warning", mitre_attck: "dark" };
       const fwIcons = { owasp: "bi-shield-fill", nist_csf: "bi-diagram-3", nist_800_82: "bi-cpu", iso_27001: "bi-check-shield", cis: "bi-list-check", mitre_attck: "bi-bullseye" };
       const fwBtns = fws.filter(f => fwLabels[f]).map(f =>
-        `<button class="btn btn-sm btn-outline-${fwColors[f] || 'secondary'}" onclick="showFrameworkReport(${auditId}, '${f}')" title="Generar informe ${fwLabels[f]}">
-          <i class="${fwIcons[f] || 'bi-file-text'} me-1"></i>${fwLabels[f] || f}
+        `<button class="btn btn-sm btn-outline-${fwColors[f] || 'secondary'}" onclick="showFrameworkReport(${auditId}, '${esc(f)}')" title="Generar informe ${esc(fwLabels[f])}">
+          <i class="${fwIcons[f] || 'bi-file-text'} me-1"></i>${esc(fwLabels[f] || f)}
         </button>`
       ).join("");
       actionsHtml = `
@@ -521,8 +537,24 @@ async function refreshAuditProgress(auditId) {
 
     if (done) stopPolling();
   } catch (err) {
-    stopPolling();
-    document.getElementById("audit-detail-body").innerHTML = `<div class="alert alert-danger py-2 small mb-0"><i class="bi bi-exclamation-triangle me-1"></i>${err.message}</div>`;
+    // Errores transitorios (red, timeout, 5xx): NO se detiene el polling,
+    // se avisa al usuario y se reintenta con el siguiente tick.
+    if (err.message && (String(err.message).includes("401") || String(err.message).toLowerCase().includes("sesión expirada"))) {
+      stopPolling();
+      alert("Sesión expirada. Vuelve a iniciar sesión.");
+      logout();
+      return;
+    }
+    const view = document.getElementById("audit-detail-body");
+    if (view && !_pollErrorShown) {
+      _pollErrorShown = true;
+      const warn = document.createElement("div");
+      warn.className = "alert alert-warning py-1 small mb-2";
+      warn.textContent = "Error temporal consultando el progreso: " + (err.message || "error");
+      view.prepend(warn);
+    }
+  } finally {
+    _pollInFlight = false;
   }
 }
 
@@ -598,9 +630,9 @@ async function showAuditReport(auditId) {
         const severidadBadge = v.severidad === "cr\u00edtica" ? "danger" : v.severidad === "alta" ? "warning" : v.severidad === "media" ? "info" : "secondary";
         const codigoVuln = v.codigo_vulnerable ? `<pre class="small mt-1 mb-0" style="background:rgba(220,53,69,.08);border-left:2px solid #dc3545;padding:4px 8px;border-radius:3px;overflow-x:auto;max-height:120px"><code class="text-danger">${escHtml(v.codigo_vulnerable)}</code></pre>` : "";
         const codigoFix = v.codigo_corregido ? `<pre class="small mt-1 mb-0" style="background:rgba(25,135,84,.08);border-left:2px solid #198754;padding:4px 8px;border-radius:3px;overflow-x:auto;max-height:120px"><code class="text-success">${escHtml(v.codigo_corregido)}</code></pre>` : "";
-        const recoHtml = v.recomendacion ? `<small class="d-block mt-1"><i class="bi bi-info-circle text-info me-1"></i>${v.recomendacion}</small>` : "";
+        const recoHtml = v.recomendacion ? `<small class="d-block mt-1"><i class="bi bi-info-circle text-info me-1"></i>${escHtml(v.recomendacion)}</small>` : "";
         const mapeos = Array.isArray(v.mapeos) ? v.mapeos : [];
-        const mapeosHtml = mapeos.length ? `<div class="mt-1 d-flex flex-wrap gap-1">${mapeos.map(m => `<span class="badge bg-secondary-subtle text-secondary small">${m.estandar || m.categoria || ''}</span>`).join("")}</div>` : "";
+        const mapeosHtml = mapeos.length ? `<div class="mt-1 d-flex flex-wrap gap-1">${mapeos.map(m => `<span class="badge bg-secondary-subtle text-secondary small">${escHtml(m.estandar || m.categoria || '')}</span>`).join("")}</div>` : "";
 
         const lineaInicio = v.linea_inicio != null ? v.linea_inicio : "?";
         const lineaFin = v.linea_fin != null ? v.linea_fin : "?";
@@ -615,8 +647,8 @@ async function showAuditReport(auditId) {
           .replace(/\{mapeos_html\}/g, mapeosHtml)
           .replace(/\{severidadBadge\}/g, severidadBadge)
           .replace(/\{cvss_score\}/g, v.cvss_score != null ? v.cvss_score.toFixed(1) : "N/A")
-          .replace(/\{impacto\}/g, v.impacto || "?")
-          .replace(/\{probabilidad\}/g, v.probabilidad || "?");
+          .replace(/\{impacto\}/g, escHtml(v.impacto || "?"))
+          .replace(/\{probabilidad\}/g, escHtml(v.probabilidad || "?"));
         itemsHtml += item;
       }
 
@@ -1079,11 +1111,19 @@ async function adminResetStuck() {
 }
 
 // ---------- UTILS ----------
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"'`]/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#96;"
+  })[c]);
+}
+function esc(v) { return v == null ? "" : escapeHtml(v); }
+
 function fillTpl(tpl, data) {
   let h = tpl;
   Object.keys(data).forEach(k => {
     const v = data[k] == null ? "" : String(data[k]);
-    h = h.replaceAll("{" + k + "}", v);
+    // {k} se escapa (XSS-safe); {k|raw} inserta HTML sin escapar (uso explícito)
+    h = h.replaceAll("{" + k + "}", escapeHtml(v));
     h = h.replaceAll("{" + k + "|raw}", v);
   });
   h = h.replace(/\{[^}]+\|raw\}/g, "");

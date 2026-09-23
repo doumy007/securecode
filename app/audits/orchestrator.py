@@ -74,8 +74,15 @@ class AuditOrchestrator:
         }
         audit.resultado_resumen = {"progress": progress}
         await self.db.execute(
-            text("UPDATE sc_auditorias SET resultado_resumen = :val WHERE id = :id"),
-            {"val": json.dumps(audit.resultado_resumen), "id": audit.id},
+            text(
+                "UPDATE sc_auditorias SET resultado_resumen = :val, updated_at = :ts "
+                "WHERE id = :id"
+            ),
+            {
+                "val": json.dumps(audit.resultado_resumen),
+                "id": audit.id,
+                "ts": datetime.datetime.utcnow(),
+            },
         )
         await self.db.commit()
 
@@ -114,14 +121,23 @@ class AuditOrchestrator:
                 await self.db.commit()
 
             detector = LanguageDetector()
+            SKIP_DIRS = {
+                ".git", "node_modules", "__pycache__", "venv", ".venv",
+                "dist", "build", ".next", ".nuxt", ".idea", ".vscode",
+                "target", ".terraform", "vendor", "site-packages",
+            }
             created = []
             for root, dirs, filenames in os.walk(clone_dir):
-                dirs[:] = [d for d in dirs if d != '.git']
+                dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
                 for filename in filenames:
                     full_path = os.path.join(root, filename)
                     try:
                         with open(full_path, 'rb') as f:
                             raw = f.read()
+                        if b"\x00" in raw[:8192]:
+                            continue  # binario
+                        if len(raw) > 20 * 1024 * 1024:
+                            continue  # demasiado grande
                         text = raw.decode('utf-8', errors='replace')
                     except Exception:
                         continue

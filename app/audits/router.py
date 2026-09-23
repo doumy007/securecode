@@ -1,25 +1,22 @@
-import asyncio
 import json
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List, Optional, Set
-from app.database import get_db, async_session_factory
+from typing import List, Optional
+from app.database import get_db
 from app.audits.service import AuditService
 from app.audits.schemas import (
     AuditoriaCreate, AuditoriaResponse, VulnerabilidadResponse,
     MapeoEstandarResponse, TareaRemediacionResponse,
 )
-from app.dependencies import get_current_active_user, require_role
+from app.dependencies import get_current_active_user, require_role, ensure_project_access, ensure_audit_access
 from app.auth.models import Usuario
 from app.ai.analyzer import AIAnalyzer
 
 logger = logging.getLogger("securecode.audit")
 
 router = APIRouter()
-
-_background_tasks: Set[asyncio.Task] = set()
 
 
 @router.post("/", response_model=AuditoriaResponse, status_code=status.HTTP_201_CREATED)
@@ -29,6 +26,7 @@ async def create_audit(
     current_user: Usuario = Depends(get_current_active_user),
 ):
     service = AuditService(db)
+    await ensure_project_access(db, data.proyecto_id, current_user)
     audit = await service.create_audit(
         proyecto_id=data.proyecto_id,
         user_id=current_user.id,
@@ -38,21 +36,6 @@ async def create_audit(
         git_username=data.git_username,
         git_token=data.git_token,
     )
-
-    async def run_background():
-        async with async_session_factory() as bg_db:
-            bg_service = AuditService(bg_db)
-            try:
-                logger.info("Background audit %s started", audit.id)
-                await bg_service.run_audit_async(audit.id)
-                logger.info("Background audit %s finished", audit.id)
-            except Exception as e:
-                logger.exception("Background audit %s failed: %s", audit.id, e)
-            await bg_db.commit()
-
-    task = asyncio.create_task(run_background())
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
 
     nombre_proyecto = await service.get_proyecto_nombre(audit.proyecto_id)
     return AuditoriaResponse(
@@ -86,10 +69,9 @@ async def list_audits(
     else:
         audits = await service.get_user_audits(current_user.id, skip, limit)
 
+    vuln_counts, proj_names = await service.get_audits_list_meta(audits)
     result = []
     for a in audits:
-        vulns = await service.get_audit_vulnerabilities(a.id)
-        nombre_proyecto = await service.get_proyecto_nombre(a.proyecto_id)
         result.append(AuditoriaResponse(
             id=a.id,
             proyecto_id=a.proyecto_id,
@@ -103,10 +85,22 @@ async def list_audits(
             git_url=a.git_url,
             created_at=a.created_at,
             completed_at=a.completed_at,
-            vulnerabilities_count=len(vulns),
-            proyecto_nombre=nombre_proyecto,
+            vulnerabilities_count=vuln_counts.get(a.id, 0),
+            proyecto_nombre=proj_names.get(a.proyecto_id),
         ))
     return result
+
+
+@router.get("/summary", response_model=dict)
+async def get_audit_summary(
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(get_current_active_user),
+):
+    service = AuditService(db)
+    is_admin = await service.is_admin_role(current_user.id)
+    if is_admin:
+        return await service.get_audit_summary()
+    return await service.get_audit_summary(current_user.id)
 
 
 @router.get("/{audit_id}", response_model=AuditoriaResponse)
@@ -116,6 +110,7 @@ async def get_audit(
     current_user: Usuario = Depends(get_current_active_user),
 ):
     service = AuditService(db)
+    await ensure_audit_access(db, audit_id, current_user)
     audit = await service.get_audit(audit_id)
     vulns = await service.get_audit_vulnerabilities(audit_id)
     nombre_proyecto = await service.get_proyecto_nombre(audit.proyecto_id)
@@ -144,6 +139,7 @@ async def get_audit_progress(
     current_user: Usuario = Depends(get_current_active_user),
 ):
     service = AuditService(db)
+    await ensure_audit_access(db, audit_id, current_user)
     return await service.get_audit_progress(audit_id)
 
 
@@ -161,9 +157,10 @@ async def reset_stuck_audits(
 async def delete_audit(
     audit_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(require_role("admin")),
+    current_user: Usuario = Depends(get_current_active_user),
 ):
     service = AuditService(db)
+    await ensure_audit_access(db, audit_id, current_user)
     audit = await service.get_audit(audit_id)
     await db.delete(audit)
     await db.commit()
@@ -176,6 +173,7 @@ async def get_audit_vulnerabilities(
     current_user: Usuario = Depends(get_current_active_user),
 ):
     service = AuditService(db)
+    await ensure_audit_access(db, audit_id, current_user)
     vulns = await service.get_audit_vulnerabilities(audit_id)
     result = []
     for v in vulns:
@@ -214,6 +212,7 @@ async def get_vulnerability(
     current_user: Usuario = Depends(get_current_active_user),
 ):
     service = AuditService(db)
+    await ensure_audit_access(db, audit_id, current_user)
     v = await service.get_vulnerability(vuln_id)
     return VulnerabilidadResponse(
         id=v.id,
@@ -247,6 +246,8 @@ async def update_vulnerability_status(
     current_user: Usuario = Depends(get_current_active_user),
 ):
     service = AuditService(db)
+    v = await service.get_vulnerability(vuln_id)
+    await ensure_audit_access(db, v.auditoria_id, current_user)
     await service.update_vulnerability_status(vuln_id, status)
     return {"message": "Estado actualizado"}
 
@@ -271,6 +272,7 @@ async def get_framework_report(
     current_user: Usuario = Depends(get_current_active_user),
 ):
     service = AuditService(db)
+    await ensure_audit_access(db, audit_id, current_user)
     audit = await service.get_audit(audit_id)
 
     fw_list = audit.frameworks or []
@@ -330,15 +332,3 @@ async def get_framework_report(
     await db.commit()
 
     return report
-
-
-@router.get("/summary", response_model=dict)
-async def get_audit_summary(
-    db: AsyncSession = Depends(get_db),
-    current_user: Usuario = Depends(get_current_active_user),
-):
-    service = AuditService(db)
-    is_admin = await service.is_admin_role(current_user.id)
-    if is_admin:
-        return await service.get_audit_summary()
-    return await service.get_audit_summary(current_user.id)

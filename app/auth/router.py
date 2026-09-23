@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.auth.service import AuthService
@@ -10,26 +10,45 @@ from app.auth.schemas import (
 )
 from app.dependencies import get_current_active_user, require_role, require_permission
 from app.auth.models import Usuario
+from app.config import settings
+from app.shared.rate_limit import LoginRateLimiter
 
 router = APIRouter()
+
+_limiter = LoginRateLimiter(
+    max_attempts=settings.LOGIN_MAX_ATTEMPTS,
+    window_seconds=settings.LOGIN_WINDOW_MINUTES * 60,
+)
+
+
+def _client_ip(request) -> str:
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 @router.post("/register", response_model=UsuarioResponse, status_code=status.HTTP_201_CREATED)
 async def register(data: UsuarioCreate, db: AsyncSession = Depends(get_db)):
     service = AuthService(db)
     await service.create_roles_if_not_exist()
+    # IMPORTANTE: el rol_id enviado por el cliente se ignora por completo
+    # (evita escalada de privilegios). Los nuevos usuarios usan el rol por defecto.
     user = await service.register_user(
         username=data.username,
         email=data.email,
         password=data.password,
         nombre_completo=data.nombre_completo,
-        rol_id=data.rol_id,
+        rol_id=None,
     )
     return user
 
 
 @router.post("/seed", status_code=status.HTTP_201_CREATED)
 async def seed_initial_data(db: AsyncSession = Depends(get_db)):
+    # Endpoint solo disponible si se habilita explícitamente vía SEED_ADMIN_ENABLED=true
+    if not settings.SEED_ADMIN_ENABLED:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recurso no encontrado")
     service = AuthService(db)
     await service.create_roles_if_not_exist()
     try:
@@ -49,9 +68,22 @@ async def seed_initial_data(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(data: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    ip = _client_ip(request)
+    if not _limiter.check(data.username, ip):
+        retry_after = settings.LOGIN_WINDOW_MINUTES * 60
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Demasiados intentos fallidos. Espera {settings.LOGIN_WINDOW_MINUTES} min.",
+            headers={"Retry-After": str(retry_after)},
+        )
     service = AuthService(db)
-    user = await service.authenticate_user(data.username, data.password)
+    try:
+        user = await service.authenticate_user(data.username, data.password)
+    except Exception:
+        _limiter.record_failure(data.username, ip)
+        raise
+    _limiter.reset(data.username, ip)
     access_token = service.create_access_token(user, rol_name=user.rol.nombre if user.rol else "unknown")
     refresh_token = service.create_refresh_token(user)
     return TokenResponse(

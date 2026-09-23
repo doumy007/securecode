@@ -18,4 +18,11 @@ RUN pip install --no-cache-dir -e .
 
 COPY . .
 
+# Usuario sin privilegios (no-root)
+RUN useradd --create-home --uid 10001 appuser
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["python", "-m", "app.workers.runner"]

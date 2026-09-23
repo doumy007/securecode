@@ -8,7 +8,7 @@ engine = create_async_engine(
     echo=settings.APP_DEBUG,
     pool_size=10,
     max_overflow=20,
-    pool_pre_ping=False,
+    pool_pre_ping=True,
     pool_recycle=3600,
 )
 
@@ -36,7 +36,7 @@ async def init_db():
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         async with engine.begin() as conn:
-            for col, col_type in [("git_username", "VARCHAR(255)"), ("git_token", "VARCHAR(512)"), ("nombre", "VARCHAR(255)"), ("tipo", "VARCHAR(20)"), ("frameworks", "JSON"), ("git_url", "VARCHAR(1024)")]:
+            for col, col_type in [("git_username", "VARCHAR(255)"), ("git_token", "VARCHAR(512)"), ("nombre", "VARCHAR(255)"), ("tipo", "VARCHAR(20)"), ("frameworks", "JSON"), ("git_url", "VARCHAR(1024)"), ("updated_at", "DATETIME")]:
                 try:
                     await conn.execute(text(f"ALTER TABLE sc_auditorias ADD COLUMN {col} {col_type}"))
                 except Exception:

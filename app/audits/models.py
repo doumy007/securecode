@@ -35,6 +35,7 @@ class Auditoria(Base):
     git_username = Column(String(255))
     git_token = Column(String(512))
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
     completed_at = Column(DateTime)
 
     proyecto = relationship("Proyecto", back_populates="auditorias")

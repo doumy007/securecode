@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-4o-mini"
     OPENAI_MAX_TOKENS: int = 4096
     OPENAI_TEMPERATURE: float = 0.1
+    OPENAI_TIMEOUT_SECONDS: float = 60.0
+    OPENAI_MAX_RETRIES: int = 3
 
     # RabbitMQ
     RABBITMQ_HOST: str = "localhost"
@@ -79,6 +81,15 @@ class Settings(BaseSettings):
 
     # MFA
     MFA_ISSUER_NAME: str = "SecureCode AI"
+
+    # Seguridad
+    # El endpoint /auth/seed solo funciona si SEED_ADMIN_ENABLED=true (por defecto desactivado en producción)
+    SEED_ADMIN_ENABLED: bool = False
+    # Secreto opcional para verificar firmas X-Hub-Signature-256 de webhooks de GitHub
+    GITHUB_WEBHOOK_SECRET: str = ""
+    # Límite de intentos de login fallidos por ventana de tiempo (anti fuerza bruta)
+    LOGIN_MAX_ATTEMPTS: int = 5
+    LOGIN_WINDOW_MINUTES: int = 15
 
     @property
     def CORS_ORIGINS_LIST(self) -> List[str]:

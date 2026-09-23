@@ -82,6 +82,55 @@ class LanguageDetector:
                             return self._detect_js_framework(os.path.join(root, f))
         return "Unknown"
 
+    def detect_framework_from_files(self, files: list) -> str:
+        """Detección de framework a partir de objetos ArchivoProyecto (sin tocar disco)."""
+        for archivo in files:
+            ruta = getattr(archivo, "ruta", "") or ""
+            f = ruta.replace("\\", "/").split("/")[-1]
+            for indicator, (lang, framework) in FRAMEWORK_INDICATORS.items():
+                if indicator.startswith("*."):
+                    if f.endswith(indicator.replace("*.", ".")):
+                        if framework:
+                            return framework
+                elif f == indicator:
+                    if framework:
+                        return framework
+                    content = (archivo.contenido or "") if hasattr(archivo, "contenido") else ""
+                    if f == "package.json":
+                        return self._detect_js_framework_content(content)
+                    if f == "requirements.txt":
+                        return self._detect_python_framework_content(content)
+        return "Unknown"
+
+    def _detect_js_framework_content(self, content: str) -> str:
+        try:
+            import json
+            data = json.loads(content)
+            deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
+            if "react" in deps:
+                return "React"
+            if "@angular/core" in deps:
+                return "Angular"
+            if "vue" in deps:
+                return "Vue.js"
+            if "next" in deps or "next.js" in deps:
+                return "Next.js"
+            if "express" in deps:
+                return "Express"
+            return "Node.js"
+        except Exception:
+            return "Node.js"
+
+    def _detect_python_framework_content(self, content: str) -> str:
+        c = (content or "").lower()
+        if "django" in c:
+            return "Django"
+        if "flask" in c:
+            return "Flask"
+        if "fastapi" in c:
+            return "FastAPI"
+        return "Python"
+
     def _detect_js_framework(self, package_json_path: str) -> str:
         try:
             import json

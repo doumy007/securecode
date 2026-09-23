@@ -1,6 +1,7 @@
 import datetime
+import json
 from datetime import timedelta
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
 from app.audits.models import Auditoria, Vulnerabilidad, MapeoEstandar, TareaRemediacion, EstadoAuditoria
@@ -83,7 +84,10 @@ class AuditService:
         return {
             "audit_id": audit.id,
             "estado": audit.estado,
-            "percentage": progress.get("percentage", 0 if audit.estado == "pendiente" else 100),
+            "percentage": progress.get(
+                "percentage",
+                100 if audit.estado == "completada" else 0,
+            ),
             "steps": progress.get("steps", []),
             "message": progress.get("message", ""),
             "vulnerabilities_found": len(vulns),
@@ -97,6 +101,28 @@ class AuditService:
             .order_by(Auditoria.created_at.desc())
         )
         return result.scalars().all()
+
+    async def get_audits_list_meta(self, audits: list[Auditoria]) -> tuple[dict, dict]:
+        """Conteos de vulnerabilidades y nombres de proyecto en 2 consultas batch
+        (en vez de N+1 contra una BD remota)."""
+        from app.projects.models import Proyecto
+        ids = [a.id for a in audits]
+        proj_ids = list({a.proyecto_id for a in audits if a.proyecto_id})
+        vuln_counts: dict = {}
+        if ids:
+            result = await self.db.execute(
+                select(Vulnerabilidad.auditoria_id, func.count())
+                .where(Vulnerabilidad.auditoria_id.in_(ids))
+                .group_by(Vulnerabilidad.auditoria_id)
+            )
+            vuln_counts = dict(result.all())
+        proj_names: dict = {}
+        if proj_ids:
+            result = await self.db.execute(
+                select(Proyecto.id, Proyecto.nombre).where(Proyecto.id.in_(proj_ids))
+            )
+            proj_names = dict(result.all())
+        return vuln_counts, proj_names
 
     async def get_user_audits(self, user_id: int, skip: int = 0, limit: int = 100) -> list[Auditoria]:
         from sqlalchemy.orm import selectinload
@@ -120,6 +146,62 @@ class AuditService:
             .offset(skip).limit(limit).order_by(Auditoria.created_at.desc())
         )
         return result.scalars().all()
+
+    async def get_pending_audits(self) -> list[Auditoria]:
+        """Todas las auditorías pendientes (sin límite) para el worker."""
+        result = await self.db.execute(
+            select(Auditoria)
+            .where(Auditoria.estado == EstadoAuditoria.PENDIENTE.value)
+            .order_by(Auditoria.created_at.asc())
+        )
+        return result.scalars().all()
+
+    async def claim_audit(self, audit_id: int) -> bool:
+        """Claim atómico: solo un worker ejecuta la auditoría. Devuelve True si se reclamó."""
+        result = await self.db.execute(
+            text(
+                "UPDATE sc_auditorias SET estado = :ej, updated_at = :now "
+                "WHERE id = :id AND estado = :pe"
+            ),
+            {
+                "ej": EstadoAuditoria.EJECUTANDO.value,
+                "pe": EstadoAuditoria.PENDIENTE.value,
+                "id": audit_id,
+                "now": datetime.datetime.utcnow(),
+            },
+        )
+        await self.db.commit()
+        return (result.rowcount or 0) > 0
+
+    async def watchdog_fail_stuck(self, max_minutes: int = 60) -> int:
+        """Marca como fallidas las auditorías 'ejecutando' sin progreso reciente."""
+        cutoff = datetime.datetime.utcnow() - timedelta(minutes=max_minutes)
+        result = await self.db.execute(
+            text(
+                "UPDATE sc_auditorias SET estado = 'fallida', completed_at = :com, "
+                "updated_at = :now, resultado_resumen = :res "
+                "WHERE estado = 'ejecutando' "
+                "AND (updated_at IS NULL OR updated_at < :cutoff)"
+            ),
+            {
+                "cutoff": cutoff,
+                "now": datetime.datetime.utcnow(),
+                "com": datetime.datetime.utcnow(),
+                "res": json.dumps(
+                    {
+                        "error": "Timeout: auditoría atascada en ejecución",
+                        "progress": {
+                            "percentage": 0,
+                            "steps": [],
+                            "message": "Timeout: auditoría atascada en ejecución",
+                            "vulnerabilities_found": 0,
+                        },
+                    }
+                ),
+            },
+        )
+        await self.db.commit()
+        return result.rowcount or 0
 
     async def is_admin_role(self, user_id: int) -> bool:
         from app.auth.models import Usuario

@@ -60,3 +60,39 @@ def require_permission(*permissions: str):
                 )
         return current_user
     return perm_checker
+
+
+async def ensure_project_access(db: AsyncSession, project_id: int, user: Usuario) -> None:
+    """IDOR: solo el propietario (o admin) puede acceder al proyecto."""
+    if user.rol.nombre == "admin":
+        return
+    from sqlalchemy import select
+    from app.projects.models import Proyecto
+    from app.exceptions import NotFoundException
+    result = await db.execute(select(Proyecto).where(Proyecto.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise NotFoundException("Proyecto no encontrado")
+    if project.user_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes acceso a este proyecto",
+        )
+
+
+async def ensure_audit_access(db: AsyncSession, audit_id: int, user: Usuario) -> None:
+    """IDOR: solo el propietario (o admin) puede acceder a la auditoría."""
+    if user.rol.nombre == "admin":
+        return
+    from sqlalchemy import select
+    from app.audits.models import Auditoria
+    from app.exceptions import NotFoundException
+    result = await db.execute(select(Auditoria).where(Auditoria.id == audit_id))
+    audit = result.scalar_one_or_none()
+    if not audit:
+        raise NotFoundException("Auditoría no encontrada")
+    if audit.user_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes acceso a esta auditoría",
+        )

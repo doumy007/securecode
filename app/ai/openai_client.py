@@ -9,12 +9,16 @@ logger = logging.getLogger("securecode.ai")
 
 class OpenAIClient:
     def __init__(self):
-        self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        self.client = AsyncOpenAI(
+            api_key=settings.OPENAI_API_KEY,
+            timeout=settings.OPENAI_TIMEOUT_SECONDS,
+            max_retries=0,  # los reintentos los gestiona tenacity (abajo)
+        )
         self.model = settings.OPENAI_MODEL
         self.max_tokens = settings.OPENAI_MAX_TOKENS
         self.temperature = settings.OPENAI_TEMPERATURE
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(stop=stop_after_attempt(settings.OPENAI_MAX_RETRIES), wait=wait_exponential(multiplier=1, min=2, max=15))
     async def chat_completion(self, messages: list, temperature: Optional[float] = None) -> str:
         try:
             response = await self.client.chat.completions.create(
