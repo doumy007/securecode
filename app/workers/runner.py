@@ -2,6 +2,7 @@ import asyncio
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import async_session_factory
+import app.models  # noqa: F401  # registra todos los modelos SQLAlchemy (mappers)
 from app.audits.service import AuditService
 
 logger = logging.getLogger("securecode.worker")

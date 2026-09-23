@@ -25,9 +25,10 @@ env/
 .DS_Store
 Thumbs.db
 
-# Project specific
-uploads/
-reports/
+# Project specific - anclados a / para NO ignorar módulos de la app
+# (p. ej. app/reports, app/storage en el futuro)
+/uploads/
+/reports/
 *.db
 
 # Docker
@@ -45,8 +46,8 @@ migrations/versions/*.pyc
 htmlcov/
 .pytest_cache/
 
-# MinIO data
-minio-data/
+# MinIO data (solo en la raíz)
+/minio-data/
 
-# Uploaded project files
-storage/
+# Uploaded project files (solo en la raíz)
+/storage/

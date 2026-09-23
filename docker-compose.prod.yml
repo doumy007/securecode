@@ -121,7 +121,7 @@ services:
       - securecode-network
 
   minio:
-    image: minio/minio
+    image: quay.io/minio/minio
     container_name: sc-minio
     command: server /data --console-address ":9001"
     ports:

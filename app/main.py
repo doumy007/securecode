@@ -10,7 +10,6 @@ from app.auth.router import router as auth_router
 from app.projects.router import router as projects_router
 from app.audits.router import router as audits_router
 from app.dashboard.router import router as dashboard_router
-from app.reports.router import router as reports_router
 from app.ai.router import router as ai_router
 from app.integrations.router import router as integrations_router
 
@@ -59,7 +58,6 @@ app.include_router(auth_router, prefix="/auth", tags=["Autenticación"])
 app.include_router(projects_router, prefix="/projects", tags=["Proyectos"])
 app.include_router(audits_router, prefix="/audits", tags=["Auditorías"])
 app.include_router(dashboard_router, prefix="/dashboard", tags=["Dashboard"])
-app.include_router(reports_router, prefix="/reports", tags=["Reportes"])
 app.include_router(ai_router, prefix="/ai", tags=["Inteligencia Artificial"])
 app.include_router(integrations_router, prefix="/integrations", tags=["Integraciones"])
 

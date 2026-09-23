@@ -31,10 +31,11 @@ build/
 *.egg
 
 # --- Datos de runtime (se montan como volúmenes) ---
-storage/
-uploads/
-reports/
-minio-data/
+# Anclados a / para NO excluir módulos de la app (p.ej. app/storage).
+/storage/
+/uploads/
+/reports/
+/minio-data/
 *.db
 *.sqlite3
 

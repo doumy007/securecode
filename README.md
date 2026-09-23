@@ -42,7 +42,7 @@ de principio a fin sin consultar nada más. **La API queda expuesta en el puerto
 | `sc-mysql`    | `mysql:8.0`                   | —           | Base de datos (interno)      | No (interno) |
 | `sc-rabbitmq` | `rabbitmq:3-management`       | 15672       | Consola de gestión RabbitMQ  | Opcional |
 | `sc-redis`    | `redis:7-alpine`              | —           | Caché (interno)              | No (interno) |
-| `sc-minio`    | `minio/minio`                 | 9001        | Consola web MinIO            | Opcional |
+| `sc-minio`    | `quay.io/minio/minio`         | 9001        | Consola web MinIO            | Opcional |
 
 > Solo el puerto **1200** es obligatorio. Los puertos 15672/9001 son consolas
 > opcionales: si no se usan, ciérralos en el firewall. MySQL/Redis/AMQP/MinIO-S3
@@ -160,8 +160,15 @@ openssl rand -hex 32
 
 ```bash
 mkdir -p uploads reports
-docker compose -f docker-compose.prod.yml up -d --build
+./deploy.sh
 ```
+
+> El wrapper `deploy.sh` limpia `DB_PASSWORD`/`DB_URL`/`DB_USERNAME` del entorno
+> del shell antes de llamar a compose. Tu `~/.bash_profile` exporta esas
+> variables de otro proyecto (PostgreSQL) y **compose da prioridad al shell
+> sobre `.env`** al interpolar, lo que inicializaba MySQL con la contraseña
+> equivocada. Equivale a:
+> `env -u DB_PASSWORD -u DB_URL -u DB_USERNAME docker compose -f docker-compose.prod.yml up -d --build`.
 
 El primer build tarda varios minutos (instala dependencias Python 3.11).
 **Resultado esperado:** `docker compose -f docker-compose.prod.yml ps` muestra
@@ -213,27 +220,33 @@ curl -s -X POST http://localhost:1200/auth/seed
 
 ```bash
 cd securecode
-docker compose -f docker-compose.prod.yml ps              # estado
-docker compose -f docker-compose.prod.yml logs -f api     # logs API en vivo
-docker compose -f docker-compose.prod.yml logs -f worker  # logs worker
-docker compose -f docker-compose.prod.yml restart api     # reiniciar API
-docker compose -f docker-compose.prod.yml down            # detener todo
-docker compose -f docker-compose.prod.yml up -d           # arrancar (sin rebuild)
+env -u DB_PASSWORD -u DB_URL -u DB_USERNAME docker compose -f docker-compose.prod.yml ps              # estado
+env -u DB_PASSWORD -u DB_URL -u DB_USERNAME docker compose -f docker-compose.prod.yml logs -f api     # logs API en vivo
+env -u DB_PASSWORD -u DB_URL -u DB_USERNAME docker compose -f docker-compose.prod.yml logs -f worker  # logs worker
+env -u DB_PASSWORD -u DB_URL -u DB_USERNAME docker compose -f docker-compose.prod.yml restart api     # reiniciar API
+env -u DB_PASSWORD -u DB_URL -u DB_USERNAME docker compose -f docker-compose.prod.yml down            # detener todo
+env -u DB_PASSWORD -u DB_URL -u DB_USERNAME docker compose -f docker-compose.prod.yml up -d           # arrancar (sin rebuild)
 ```
+
+> El prefijo `env -u ...` es necesario en este servidor por las variables de
+> `~/.bash_profile` de otro proyecto (ver Paso 3). `./deploy.sh` ya lo incluye.
 
 ### Actualizar a una versión nueva del código
 
 ```bash
 git pull origin master
-docker compose -f docker-compose.prod.yml up -d --build
+./deploy.sh
 ```
 
 ### Backup de la base de datos
 
 ```bash
-docker compose -f docker-compose.prod.yml exec mysql \
-  mysqldump -u securecode -psecurecode_pass securecode_db > backup_$(date +%F).sql
+env -u DB_PASSWORD -u DB_URL -u DB_USERNAME docker compose -f docker-compose.prod.yml exec -T mysql \
+  sh -c 'mysqldump -u "$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE"' > backup_$(date +%F).sql
 ```
+
+> Toma las credenciales de las variables del propio contenedor (`MYSQL_*`), sin
+> exponer el secreto en la línea de comandos.
 
 ---
 
@@ -268,7 +281,9 @@ docker compose -f docker-compose.prod.yml up -d   # sin --build: usa las imágen
 
 - **Puerto 1200:** el mapeo es `1200:8000`. Dentro del contenedor la app siempre escucha
   en el 8000 (`CMD` del `Dockerfile`); no cambies `APP_PORT` salvo que cambies el `Dockerfile`.
-- **Python 3.11:** las imágenes usan `python:3.11-slim` a propósito. No usar 3.14
+- **Python 3.11:** las imágenes usan `python:3.11-slim-bookworm` a propósito
+  (pin a Debian 12: en `python:3.11-slim` actual, basado en Debian 13/trixie,
+  el paquete `libgdk-pixbuf2.0-0` se renombró y rompe el build). No usar 3.14
   (`numpy`/`matplotlib`/`asyncmy` no tienen wheels y rompen el build).
 - **Migraciones:** al arrancar, `init_db()` crea las tablas automáticamente
   (`app/database.py`). Alembic (`migrations/`) queda para evolución futura del esquema.
