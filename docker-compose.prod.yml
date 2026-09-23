@@ -5,7 +5,10 @@
 # - La API queda expuesta en el puerto 1200 del host
 #   (mapeo 1200 -> 8000 interno del contenedor).
 # - Los puertos internos de datos (MySQL, Redis, AMQP, MinIO S3)
-#   NO se publican al host por seguridad; solo consolas web.
+#   NO se publican al host por seguridad; solo consolas opcionales
+#   (RabbitMQ 15672, MinIO 9001).
+# - NOTA: SonarQube NO se incluye en producción (v10+ no soporta MySQL).
+#   La app funciona sin él; sus workers de análisis son autocontenidos.
 # - Requiere un archivo .env junto a este fichero (ver README.md).
 # ============================================================
 
@@ -91,6 +94,12 @@ services:
     container_name: sc-rabbitmq
     ports:
       - "15672:15672" # Consola de gestión (opcional, cerrar en firewall si no se usa)
+    environment:
+      # Obligatorio: "guest" solo puede conectar desde localhost y los
+      # contenedores sc-api/sc-worker NO son localhost. Credenciales reales
+      # van en .env (RABBITMQ_USER / RABBITMQ_PASSWORD).
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-securecode}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-securecode_pass}
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
@@ -122,21 +131,6 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
-    restart: unless-stopped
-    networks:
-      - securecode-network
-
-  sonarqube:
-    image: sonarqube:community
-    container_name: sc-sonarqube
-    ports:
-      - "9002:9000" # Consola SonarQube (opcional, pesado: ver README)
-    environment:
-      - SONAR_JDBC_URL=jdbc:mysql://mysql:3306/sonar?useUnicode=true&characterEncoding=utf8
-      - SONAR_JDBC_USERNAME=${DB_USER:-securecode}
-      - SONAR_JDBC_PASSWORD=${DB_PASSWORD:-securecode_pass}
-    depends_on:
-      - mysql
     restart: unless-stopped
     networks:
       - securecode-network

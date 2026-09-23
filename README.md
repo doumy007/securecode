@@ -25,12 +25,12 @@ de principio a fin sin consultar nada más. **La API queda expuesta en el puerto
               │ 8.0, interno)     │ │ (colas, mgmt  │ │ (caché,       │
               │                   │ │ :15672)       │ │  interno)     │
               └───────────────────┘ └───────────────┘ └───────────────┘
-              ┌───────────────────┐ ┌───────────────┐ ┌───────────────┐
-              │ sc-worker         │ │ sc-minio      │ │ sc-sonarqube  │
-              │ (auditorías en    │ │ (objetos,     │ │ (opcional,    │
-              │  background)      │ │  consola      │ │  consola      │
-              │                   │ │  :9001)       │ │  :9002)       │
-              └───────────────────┘ └───────────────┘ └───────────────┘
+              ┌───────────────────┐ ┌───────────────┐
+              │ sc-worker         │ │ sc-minio      │
+              │ (auditorías en    │ │ (objetos,     │
+              │  background)      │ │  consola      │
+              │                   │ │  :9001)       │
+              └───────────────────┘ └───────────────┘
 ```
 
 ### 1.1 Tabla de servicios y puertos (host)
@@ -43,17 +43,17 @@ de principio a fin sin consultar nada más. **La API queda expuesta en el puerto
 | `sc-rabbitmq` | `rabbitmq:3-management`       | 15672       | Consola de gestión RabbitMQ  | Opcional |
 | `sc-redis`    | `redis:7-alpine`              | —           | Caché (interno)              | No (interno) |
 | `sc-minio`    | `minio/minio`                 | 9001        | Consola web MinIO            | Opcional |
-| `sc-sonarqube`| `sonarqube:community`         | 9002        | Consola SonarQube (pesado)   | Opcional |
 
-> Solo el puerto **1200** es obligatorio. Los puertos 15672/9001/9002 son consolas
+> Solo el puerto **1200** es obligatorio. Los puertos 15672/9001 son consolas
 > opcionales: si no se usan, ciérralos en el firewall. MySQL/Redis/AMQP/MinIO-S3
 > **no** se publican al host por seguridad (los contenedores se comunican por la red interna).
+> SonarQube **no** se incluye en el compose de producción (v10+ no soporta MySQL).
 
 ### 1.2 Requisitos del servidor
 
 - Ubuntu 22.04+ (x86_64 — verificar con `uname -m`, debe decir `x86_64`).
-- Mínimo **4 GB RAM** (8 GB recomendados si se usa SonarQube).
-- Puertos libres: **1200** (obligatorio), 15672/9001/9002 (opcionales).
+- Mínimo **4 GB RAM**.
+- Puertos libres: **1200** (obligatorio), 15672/9001 (opcionales).
 - Acceso a internet (para descargar imágenes base y paquetes Python).
 - Una **API key de OpenAI** (sin ella la app arranca, pero el análisis IA, el chat
   y los reportes por framework fallarán).
@@ -119,8 +119,8 @@ OPENAI_TEMPERATURE=0.1
 # --- RabbitMQ / Redis / MinIO (valores internos del compose) ---
 RABBITMQ_HOST=rabbitmq
 RABBITMQ_PORT=5672
-RABBITMQ_USER=guest
-RABBITMQ_PASSWORD=guest
+RABBITMQ_USER=securecode
+RABBITMQ_PASSWORD=securecode_pass
 RABBITMQ_QUEUE=audit_tasks
 REDIS_HOST=redis
 REDIS_PORT=6379
@@ -143,7 +143,7 @@ APP_CORS_ORIGINS=http://localhost:4200,http://localhost:3000
 APP_UPLOAD_DIR=./uploads
 APP_MAX_UPLOAD_SIZE_MB=500
 MFA_ISSUER_NAME=SecureCode AI
-SONARQUBE_URL=http://sonarqube:9000
+SONARQUBE_URL=http://localhost:9000  # no desplegado por defecto (excluido del compose prod)
 SONARQUBE_TOKEN=
 ```
 
@@ -167,9 +167,9 @@ El primer build tarda varios minutos (instala dependencias Python 3.11).
 **Resultado esperado:** `docker compose -f docker-compose.prod.yml ps` muestra
 `sc-api`, `sc-worker`, `sc-mysql` (healthy), `sc-rabbitmq` (healthy), `sc-redis`, `sc-minio` en `Up`.
 
-> SonarQube (`sc-sonarqube`) tarda varios minutos en arrancar y exige
-> `vm.max_map_count`. Si falla o no lo necesitas, puedes excluirlo (ver 6.3);
-> la app funciona sin él (sus workers de análisis son autocontenidos).
+> SonarQube **no se incluye** en el compose de producción: v10+ ya no soporta
+> MySQL (exige su propia BD y `vm.max_map_count`). La app funciona sin él;
+> sus workers de análisis son autocontenidos.
 
 ### Paso 4 — Verificar salud y crear el admin
 
@@ -191,9 +191,8 @@ curl -s -X POST http://localhost:1200/auth/seed
 | `http://SERVIDOR:1200/` | Frontend (SPA) — entrar con `admin` / `Admin123!` |
 | `http://SERVIDOR:1200/docs` | Swagger interactivo de la API |
 | `http://SERVIDOR:1200/health` | Salud del servicio |
-| `http://SERVIDOR:15672` | RabbitMQ (guest/guest) — opcional |
+| `http://SERVIDOR:15672` | RabbitMQ (según `.env`) — opcional |
 | `http://SERVIDOR:9001` | MinIO (según `.env`) — opcional |
-| `http://SERVIDOR:9002` | SonarQube — opcional |
 
 **Resultado esperado:** login OK en el frontend y `GET /docs` responde 200.
 
@@ -261,7 +260,7 @@ docker compose -f docker-compose.prod.yml up -d   # sin --build: usa las imágen
 
 > El `image: securecode-api:1.0.0` / `securecode-worker:1.0.0` ya está declarado en
 > `docker-compose.prod.yml`, así que `up` reutiliza las imágenes cargadas.
-> Las imágenes públicas (mysql, rabbitmq, redis, minio, sonarqube) se descargan solas.
+> Las imágenes públicas (mysql, rabbitmq, redis, minio) se descargan solas.
 
 ---
 
@@ -288,7 +287,6 @@ docker compose -f docker-compose.prod.yml up -d   # sin --build: usa las imágen
 |---|---|---|
 | `port 1200 is already allocated` | Puerto ocupado | `sudo ss -tlnp \| grep 1200` y libera el proceso, o cambia el mapeo en el compose |
 | `sc-mysql` nunca pasa a `healthy` | Falta memoria / disco | `docker compose logs mysql`; libera disco (`docker system prune`) |
-| `sc-sonarqube` en restart loop | `vm.max_map_count` bajo | `sudo sysctl -w vm.max_map_count=262144` (+ persistir en `/etc/sysctl.conf`); o comenta el servicio `sonarqube` en el compose si no lo usas |
 | Build muy lento / falla por red | Descarga de wheels | Reintenta `up -d --build`; verifica DNS/internet del servidor |
 | `/health` responde pero login falla | `.env` con JWT distinto entre builds o BD vacía | Re-ejecuta `POST /auth/seed`; revisa `logs api` |
 | Auditoría se queda en `ejecutando` | Worker caído o reinicio a mitad | `POST /audits/reset-stuck` como admin, o reinicia `worker` |
