@@ -214,8 +214,64 @@ class ProjectService:
         return project
 
     async def delete_project(self, project_id: int):
-        project = await self.get_project(project_id)
-        await self.db.delete(project)
+        # Verificar existencia (404), igual que el comportamiento anterior.
+        exists = (
+            await self.db.execute(
+                text("SELECT 1 FROM sc_proyectos WHERE id = :pid"), {"pid": project_id}
+            )
+        ).scalar()
+        if not exists:
+            raise NotFoundException("Proyecto no encontrado")
+
+        # Borrado masivo por SQL en orden de dependencias (FK). El borrado ORM
+        # emitía un DELETE por fila a través de la BD remota y tardaba 17-44 s,
+        # superando el timeout de 30 s del frontend ("La petición tardó
+        # demasiado"). Con DELETE en lote por tabla se hace en 1-3 s.
+        audit_ids = (
+            await self.db.execute(
+                text("SELECT id FROM sc_auditorias WHERE proyecto_id = :pid"),
+                {"pid": project_id},
+            )
+        ).scalars().all()
+        if audit_ids:
+            params = {"aids": audit_ids}
+            aids = bindparam("aids", expanding=True)
+            await self.db.execute(
+                text("DELETE FROM sc_historial_ejecuciones WHERE auditoria_id IN :aids").bindparams(aids),
+                params,
+            )
+            await self.db.execute(
+                text(
+                    "DELETE FROM sc_mapeo_estandares "
+                    "WHERE vulnerabilidad_id IN ("
+                    "SELECT id FROM sc_vulnerabilidades WHERE auditoria_id IN :aids)"
+                ).bindparams(aids),
+                params,
+            )
+            await self.db.execute(
+                text("DELETE FROM sc_tareas_remediacion WHERE auditoria_id IN :aids").bindparams(aids),
+                params,
+            )
+            await self.db.execute(
+                text("DELETE FROM sc_resultados_worker WHERE auditoria_id IN :aids").bindparams(aids),
+                params,
+            )
+            await self.db.execute(
+                text("DELETE FROM sc_vulnerabilidades WHERE auditoria_id IN :aids").bindparams(aids),
+                params,
+            )
+            await self.db.execute(
+                text("DELETE FROM sc_auditorias WHERE id IN :aids").bindparams(aids),
+                params,
+            )
+        await self.db.execute(
+            text("DELETE FROM sc_archivos_proyecto WHERE proyecto_id = :pid"),
+            {"pid": project_id},
+        )
+        await self.db.execute(
+            text("DELETE FROM sc_proyectos WHERE id = :pid"),
+            {"pid": project_id},
+        )
         await self.db.commit()
 
     async def process_upload(self, project_id: int, file_path: str, project_dir: str) -> dict:

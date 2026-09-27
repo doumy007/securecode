@@ -191,11 +191,31 @@ async def delete_audit(
     await ensure_audit_access(db, audit_id, current_user)
     audit = await service.get_audit(audit_id)
     proyecto_id = audit.proyecto_id
-    await db.delete(audit)
-    await db.commit()
-    # Libera el snapshot de código de la auditoría borrada (ya sin sus
-    # vulnerabilidades). Solo se eliminan filas que ninguna otra auditoría
-    # siga referenciando por archivo.
+    # Borrado masivo por SQL en orden de dependencias (FK): el borrado ORM
+    # emitía un DELETE por fila a través de la BD remota (lento en auditorías
+    # con miles de vulnerabilidades) y podía superar el timeout del frontend.
+    await db.execute(
+        text("DELETE FROM sc_historial_ejecuciones WHERE auditoria_id = :aid"), {"aid": audit_id}
+    )
+    await db.execute(
+        text(
+            "DELETE FROM sc_mapeo_estandares "
+            "WHERE vulnerabilidad_id IN ("
+            "SELECT id FROM sc_vulnerabilidades WHERE auditoria_id = :aid)"
+        ),
+        {"aid": audit_id},
+    )
+    await db.execute(
+        text("DELETE FROM sc_tareas_remediacion WHERE auditoria_id = :aid"), {"aid": audit_id}
+    )
+    await db.execute(
+        text("DELETE FROM sc_resultados_worker WHERE auditoria_id = :aid"), {"aid": audit_id}
+    )
+    await db.execute(
+        text("DELETE FROM sc_vulnerabilidades WHERE auditoria_id = :aid"), {"aid": audit_id}
+    )
+    # Libera el snapshot de código de la auditoría borrada: solo filas que
+    # ninguna otra auditoría siga referenciando por archivo.
     await db.execute(
         text(
             "DELETE FROM sc_archivos_proyecto "
@@ -203,6 +223,9 @@ async def delete_audit(
             "AND id NOT IN (SELECT archivo_id FROM sc_vulnerabilidades WHERE archivo_id IS NOT NULL)"
         ),
         {"aid": audit_id},
+    )
+    await db.execute(
+        text("DELETE FROM sc_auditorias WHERE id = :aid"), {"aid": audit_id}
     )
     await db.commit()
     cache.clear_prefix("audits:list:")
