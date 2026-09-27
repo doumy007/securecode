@@ -4,8 +4,10 @@
 #
 # - La API queda expuesta en el puerto 1200 del host
 #   (mapeo 1200 -> 8000 interno del contenedor).
-# - Los puertos internos de datos (MySQL, Redis, AMQP, MinIO S3)
-#   NO se publican al host por seguridad; solo consolas opcionales
+# - Los datos viven en la BD externa (DB_HOST de .env); NO se usa MySQL
+#   interno desde el P1 (mysql fue retirado del stack).
+# - Los puertos internos de datos (Redis, AMQP, MinIO S3) NO se publican
+#   al host por seguridad; solo consolas opcionales
 #   (RabbitMQ 15672, MinIO 9001).
 # - NOTA: SonarQube NO se incluye en producción (v10+ no soporta MySQL).
 #   La app funciona sin él; sus workers de análisis son autocontenidos.
@@ -34,8 +36,6 @@ services:
     env_file:
       - .env
     depends_on:
-      mysql:
-        condition: service_healthy
       rabbitmq:
         condition: service_healthy
       redis:
@@ -89,25 +89,6 @@ services:
     networks:
       - securecode-network
 
-  mysql:
-    image: mysql:8.0
-    container_name: sc-mysql
-    environment:
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-rootpassword}
-      MYSQL_DATABASE: ${DB_NAME:-securecode_db}
-      MYSQL_USER: ${DB_USER:-securecode}
-      MYSQL_PASSWORD: ${DB_PASSWORD:-securecode_pass}
-    volumes:
-      - mysql_data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-    networks:
-      - securecode-network
-
   rabbitmq:
     image: rabbitmq:3-management
     container_name: sc-rabbitmq
@@ -155,7 +136,6 @@ services:
       - securecode-network
 
 volumes:
-  mysql_data:
   rabbitmq_data:
   redis_data:
   minio_data:
