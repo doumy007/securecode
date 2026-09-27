@@ -1,4 +1,4 @@
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.audits.models import Auditoria, Vulnerabilidad
 from app.projects.models import Proyecto
@@ -19,75 +19,103 @@ class DashboardService:
         return rol_id == 1  # admin rol
 
     async def get_kpi(self, user_id: Optional[int] = None) -> dict:
-        audit_query = select(Auditoria)
-        vuln_query = select(Vulnerabilidad)
-
+        # Agregaciones SQL: en lugar de cargar TODAS las auditorías y
+        # vulnerabilidades a memoria (se degradaba con el volumen), se cuentan
+        # por estado y por severidad directamente en la BD.
+        audit_query = select(Auditoria.estado, func.count()).group_by(Auditoria.estado)
         if user_id:
             audit_query = audit_query.where(Auditoria.user_id == user_id)
-            vuln_query = vuln_query.join(Auditoria).where(Auditoria.user_id == user_id)
+        estado_rows = (await self.db.execute(audit_query)).all()
+        estado_counts = {r[0]: (r[1] or 0) for r in estado_rows}
 
-        audits = (await self.db.execute(audit_query)).scalars().all()
-        vulns = (await self.db.execute(vuln_query)).scalars().all()
+        vuln_query = select(
+            func.count(Vulnerabilidad.id),
+            func.coalesce(func.sum(case((Vulnerabilidad.cvss_score >= 9.0, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((and_(Vulnerabilidad.cvss_score >= 7.0, Vulnerabilidad.cvss_score < 9.0), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((and_(Vulnerabilidad.cvss_score >= 4.0, Vulnerabilidad.cvss_score < 7.0), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((and_(Vulnerabilidad.cvss_score >= 0.0, Vulnerabilidad.cvss_score < 4.0), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((Vulnerabilidad.resuelta == "completada", 1), else_=0)), 0),
+        ).join(Auditoria, Vulnerabilidad.auditoria_id == Auditoria.id)
+        if user_id:
+            vuln_query = vuln_query.where(Auditoria.user_id == user_id)
+        result = await self.db.execute(vuln_query)
+        total_vulns, critical, high, medium, low, resolved = result.one()
 
         proyectos = (await self.db.execute(select(func.count()).select_from(Proyecto))).scalar()
         usuarios = (await self.db.execute(select(func.count()).select_from(Usuario))).scalar()
 
         return {
             "total_proyectos": proyectos or 0,
-            "total_auditorias": len(audits),
-            "total_vulnerabilidades": len(vulns),
+            "total_auditorias": sum(estado_counts.values()),
+            "total_vulnerabilidades": int(total_vulns or 0),
             "total_usuarios": usuarios or 0,
-            "completed_audits": sum(1 for a in audits if a.estado == "completada"),
-            "failed_audits": sum(1 for a in audits if a.estado == "fallida"),
-            "critical": sum(1 for v in vulns if v.cvss_score and v.cvss_score >= 9.0),
-            "high": sum(1 for v in vulns if v.cvss_score and 7.0 <= v.cvss_score < 9.0),
-            "medium": sum(1 for v in vulns if v.cvss_score and 4.0 <= v.cvss_score < 7.0),
-            "low": sum(1 for v in vulns if v.cvss_score and v.cvss_score < 4.0),
-            "resolved": sum(1 for v in vulns if v.resuelta == "completada"),
-            "compliance_score": self._calculate_compliance_score(vulns),
+            "completed_audits": estado_counts.get("completada", 0),
+            "failed_audits": estado_counts.get("fallida", 0),
+            "critical": int(critical or 0),
+            "high": int(high or 0),
+            "medium": int(medium or 0),
+            "low": int(low or 0),
+            "resolved": int(resolved or 0),
+            "compliance_score": self._calculate_compliance_score(
+                total_vulns, critical, resolved
+            ),
         }
 
     async def get_vulnerability_by_severity(self, user_id: Optional[int] = None) -> dict:
-        vuln_query = select(Vulnerabilidad)
+        vuln_query = select(
+            func.coalesce(func.sum(case((Vulnerabilidad.cvss_score >= 9.0, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((and_(Vulnerabilidad.cvss_score >= 7.0, Vulnerabilidad.cvss_score < 9.0), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((and_(Vulnerabilidad.cvss_score >= 4.0, Vulnerabilidad.cvss_score < 7.0), 1), else_=0)), 0),
+            func.coalesce(func.sum(case((and_(Vulnerabilidad.cvss_score >= 0.0, Vulnerabilidad.cvss_score < 4.0), 1), else_=0)), 0),
+        ).join(Auditoria, Vulnerabilidad.auditoria_id == Auditoria.id)
         if user_id:
-            vuln_query = vuln_query.join(Auditoria).where(Auditoria.user_id == user_id)
-        vulns = (await self.db.execute(vuln_query)).scalars().all()
+            vuln_query = vuln_query.where(Auditoria.user_id == user_id)
+        critical, high, medium, low = (await self.db.execute(vuln_query)).one()
 
+        counts = [int(critical or 0), int(high or 0), int(medium or 0), int(low or 0)]
         return {
-            "critical": sum(1 for v in vulns if v.cvss_score and v.cvss_score >= 9.0),
-            "high": sum(1 for v in vulns if v.cvss_score and 7.0 <= v.cvss_score < 9.0),
-            "medium": sum(1 for v in vulns if v.cvss_score and 4.0 <= v.cvss_score < 7.0),
-            "low": sum(1 for v in vulns if v.cvss_score and v.cvss_score < 4.0),
+            "critical": counts[0],
+            "high": counts[1],
+            "medium": counts[2],
+            "low": counts[3],
             "labels": ["Crítica", "Alta", "Media", "Baja"],
-            "series": [
-                sum(1 for v in vulns if v.cvss_score and v.cvss_score >= 9.0),
-                sum(1 for v in vulns if v.cvss_score and 7.0 <= v.cvss_score < 9.0),
-                sum(1 for v in vulns if v.cvss_score and 4.0 <= v.cvss_score < 7.0),
-                sum(1 for v in vulns if v.cvss_score and v.cvss_score < 4.0),
-            ],
+            "series": counts,
             "colors": ["#dc2626", "#f97316", "#eab308", "#6b7280"],
         }
 
     async def get_trends(self, user_id: Optional[int] = None) -> dict:
-        from sqlalchemy.orm import selectinload
-        audit_query = select(Auditoria).options(selectinload(Auditoria.vulnerabilidades)).order_by(Auditoria.created_at.asc())
+        # Auditorías y vulnerabilidades agrupadas por día en BD (1 query c/u)
+        # en lugar de cargar todas las auditorías + sus vulns a memoria.
+        date_col = func.date(Auditoria.created_at)
+        audit_query = (
+            select(date_col.label("d"), func.count().label("c"))
+            .where(Auditoria.created_at.is_not(None))
+            .group_by(date_col)
+            .order_by(date_col)
+        )
+        vuln_query = (
+            select(date_col.label("d"), func.count(Vulnerabilidad.id).label("c"))
+            .join(Auditoria, Vulnerabilidad.auditoria_id == Auditoria.id)
+            .where(Auditoria.created_at.is_not(None))
+            .group_by(date_col)
+            .order_by(date_col)
+        )
         if user_id:
             audit_query = audit_query.where(Auditoria.user_id == user_id)
+            vuln_query = vuln_query.where(Auditoria.user_id == user_id)
 
-        audits = (await self.db.execute(audit_query)).scalars().all()
+        audit_rows = (await self.db.execute(audit_query)).all()
+        vuln_rows = (await self.db.execute(vuln_query)).all()
 
-        trends = {}
-        for audit in audits:
-            date_key = audit.created_at.strftime("%Y-%m-%d") if audit.created_at else "unknown"
-            if date_key not in trends:
-                trends[date_key] = {"audits": 0, "vulnerabilities": 0}
-            trends[date_key]["audits"] += 1
-            trends[date_key]["vulnerabilities"] += len(audit.vulnerabilidades)
+        vuln_counts = {str(r.d): (r.c or 0) for r in vuln_rows}
+        dates = [str(r.d) for r in audit_rows]
+        audits = [r.c or 0 for r in audit_rows]
+        vulnerabilities = [vuln_counts.get(d, 0) for d in dates]
 
         return {
-            "dates": list(trends.keys()),
-            "audits": [t["audits"] for t in trends.values()],
-            "vulnerabilities": [t["vulnerabilities"] for t in trends.values()],
+            "dates": dates,
+            "audits": audits,
+            "vulnerabilities": vulnerabilities,
         }
 
     async def get_compliance_radar(self) -> dict:
@@ -97,10 +125,8 @@ class DashboardService:
             "max_score": 100,
         }
 
-    def _calculate_compliance_score(self, vulns: list) -> float:
-        if not vulns:
+    def _calculate_compliance_score(self, total_vulns, critical_count, resolved_count) -> float:
+        if not total_vulns:
             return 100.0
-        critical_count = sum(1 for v in vulns if v.cvss_score and v.cvss_score >= 9.0)
-        resolved_count = sum(1 for v in vulns if v.resuelta == "completada")
-        score = 100 - (critical_count * 10) - (len(vulns) - resolved_count) * 2
+        score = 100 - (int(critical_count or 0) * 10) - (int(total_vulns) - int(resolved_count or 0)) * 2
         return max(0, min(100, score))

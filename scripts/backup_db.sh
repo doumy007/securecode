@@ -7,8 +7,9 @@
 #   0 3 * * * cd /ruta/a/securecode && ./scripts/backup_db.sh >> storage/backups/backup.log 2>&1
 #
 # Guarda hasta $BACKUPS_KEEP copias comprimidas (gzip) en
-# ./storage/backups con el nombre securecode_<fecha>.sql.gz y
-# falla con código 1 si el dump sale vacío (p. ej. red del hosting caída).
+# ./backups (junto al repo, añadido a .gitignore) con el nombre
+# securecode_<fecha>.sql.gz y falla con código 1 si el dump sale vacío
+# (p. ej. red del hosting caída).
 # NOTA: mantén una copia fuera de este servidor (off-site) para
 # recuperación ante desastre del hosting.
 #
@@ -21,15 +22,19 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$DIR"
 
-BACKUP_DIR="${BACKUP_DIR:-$DIR/storage/backups}"
+BACKUP_DIR="${BACKUP_DIR:-$DIR/backups}"
 BACKUPS_KEEP="${BACKUPS_KEEP:-14}"
 mkdir -p "$BACKUP_DIR"
 
-# Cargar credenciales desde .env (no se imprimen en logs/cliente).
-set -a
-# shellcheck disable=SC1091
-source .env
-set +a
+# Cargar SOLO las variables de BD desde .env sin evaluar todo el archivo
+# ('source .env' es frágil: cualquier valor con espacios/# rompe el parseo).
+# Además la contraseña no se imprime en logs ni en ps (se pasa por MYSQL_PWD).
+envfile="$DIR/.env"
+for key in DB_HOST DB_PORT DB_USER DB_PASSWORD DB_NAME; do
+  val=$(grep -E "^${key}=" "$envfile" | head -1 | cut -d= -f2-)
+  val="${val%\"}"; val="${val#\"}"   # quitar comillas envolventes si las hay
+  export "$key=$val"
+done
 : "${DB_HOST:?DB_HOST no definido en .env}"
 : "${DB_USER:?DB_USER no definido en .env}"
 : "${DB_PASSWORD:?DB_PASSWORD no definido en .env}"
@@ -39,10 +44,36 @@ DB_PORT="${DB_PORT:-3306}"
 run_mysqldump() {
   if command -v mysqldump >/dev/null 2>&1; then
     mysqldump "$@"
-  elif command -v docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; then
-    docker run --rm mysql:8.0 mysqldump "$@"
+    return
+  fi
+
+  # Fallback con docker. La contraseña se pasa por --env-file (NO por -e en
+  # línea de comandos): evita exponerla en ps/logs y problemas de expansión
+  # del shell interno de sg.
+  local envfile
+  envfile=$(mktemp "${TMPDIR:-/tmp}/sc_backup_env.XXXXXX") || return 1
+  trap 'rm -f "$envfile"' RETURN
+  chmod 600 "$envfile"
+  printf 'MYSQL_PWD=%s\n' "$MYSQL_PWD" > "$envfile"
+
+  local base=(docker run --rm -i --env-file "$envfile" mysql:8.0 mysqldump)
+
+  if docker version >/dev/null 2>&1; then
+    "${base[@]}" "$@"
+  elif command -v sg >/dev/null 2>&1 && sg docker -c "docker version" >/dev/null 2>&1; then
+    # Construir el comando para el shell interno de sg con escape %q seguro.
+    local cmd=""
+    local arg
+    for arg in "${base[@]}"; do
+      cmd+="$(printf '%q ' "$arg")"
+    done
+    for arg in "$@"; do
+      cmd+="$(printf '%q ' "$arg")"
+    done
+    sg docker -c "$cmd"
   else
-    echo "[$(date -Is)] ERROR: mysqldump no encontrado (ni cliente MySQL ni docker)." >&2
+    echo "[$(date -Is)] ERROR: mysqldump no encontrado (ni cliente MySQL ni acceso a docker)." >&2
+    rm -f "$envfile"
     exit 1
   fi
 }

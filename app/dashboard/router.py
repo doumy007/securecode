@@ -16,7 +16,7 @@ async def get_dashboard_kpi(
 ):
     service = DashboardService(db)
     is_admin = await service._is_admin_role(current_user.id)
-    if is_admin or current_user.id == 1:
+    if is_admin:
         return await service.get_kpi()
     return await service.get_kpi(current_user.id)
 

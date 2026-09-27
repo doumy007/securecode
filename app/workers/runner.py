@@ -14,6 +14,9 @@ logger = logging.getLogger("securecode.worker")
 # no matar auditorías grandes contra la BD remota lenta.
 AUDIT_TIMEOUT_MINUTES = settings.APP_AUDIT_TIMEOUT_MINUTES
 POLL_INTERVAL_SECONDS = 5
+# Backoff máximo cuando la BD está caída/indisponible (evita log spam y ciclos
+# de trabajo inútiles).
+MAX_BACKOFF_SECONDS = 300
 
 
 async def watchdog(db: AsyncSession, service: AuditService) -> None:
@@ -26,7 +29,9 @@ async def watchdog(db: AsyncSession, service: AuditService) -> None:
 
 
 async def process_pending_audits():
+    backoff = POLL_INTERVAL_SECONDS
     while True:
+        clean_pass = True
         try:
             async with async_session_factory() as db:
                 service = AuditService(db)
@@ -45,10 +50,19 @@ async def process_pending_audits():
                         logger.info(f"Auditoría {audit.id} finalizada")
                     except Exception as e:
                         logger.exception(f"Error ejecutando auditoría {audit.id}: {e}")
+                        clean_pass = False
         except Exception as e:
             logger.error(f"Error en worker loop: {e}")
+            clean_pass = False
 
-        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+        # Backoff exponencial: si hubo cualquier error (BD caída, etc.) se
+        # espera cada vez más (hasta MAX_BACKOFF_SECONDS); al pasar un ciclo
+        # limpio se vuelve al intervalo base.
+        if clean_pass:
+            backoff = POLL_INTERVAL_SECONDS
+        else:
+            backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
+        await asyncio.sleep(backoff)
 
 
 if __name__ == "__main__":
