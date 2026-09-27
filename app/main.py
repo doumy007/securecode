@@ -1,4 +1,6 @@
 import logging
+import datetime
+from datetime import timedelta
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -29,8 +31,17 @@ async def lifespan(app: FastAPI):
     async with async_session_factory() as startup_db:
         from sqlalchemy import select
         from app.audits.models import Auditoria
+        # Solo se marcan como fallidas las 'ejecutando' SIN heartbeat reciente.
+        # Si el worker está procesando una auditoría activa, el reinicio de la
+        # API no debe matarla (igual criterio que el watchdog).
+        cutoff = datetime.datetime.utcnow() - timedelta(
+            minutes=settings.APP_AUDIT_TIMEOUT_MINUTES
+        )
         result = await startup_db.execute(
-            select(Auditoria).where(Auditoria.estado == "ejecutando")
+            select(Auditoria).where(
+                Auditoria.estado == "ejecutando",
+                (Auditoria.updated_at.is_(None)) | (Auditoria.updated_at < cutoff),
+            )
         )
         stuck = result.scalars().all()
         for a in stuck:

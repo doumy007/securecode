@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.projects.models import Proyecto, ArchivoProyecto
 from app.projects.service import ProjectService
 from app.projects.detector import LanguageDetector
+from app.config import settings
 from app.workers.sonarqube import SonarQubeWorker
 from app.workers.semgrep import SemgrepWorker
 from app.workers.dependency_check import DependencyCheckWorker
@@ -127,6 +128,10 @@ class AuditOrchestrator:
                 "target", ".terraform", "vendor", "site-packages",
             }
             created = []
+            # Heartbeat + INSERT progresivos: con repos grandes y BD remota lenta,
+            # un único commit al final podría superar el umbral del watchdog y
+            # dejar la auditoría en memoria durante demasiado tiempo.
+            BATCH = 300
             for root, dirs, filenames in os.walk(clone_dir):
                 dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
                 for filename in filenames:
@@ -157,6 +162,21 @@ class AuditOrchestrator:
                     )
                     self.db.add(archivo)
                     created.append(archivo)
+                    if len(created) % BATCH == 0:
+                        # Commit visible al watchdog (heartbeat en updated_at) y
+                        # sacar del identity map los objetos ya persistidos.
+                        await self.db.execute(
+                            text(
+                                "UPDATE sc_auditorias SET updated_at = :ts WHERE id = :id"
+                            ),
+                            {"id": audit.id, "ts": datetime.datetime.utcnow()},
+                        )
+                        await self.db.commit()
+                        for obj in created[-BATCH:]:
+                            self.db.expunge(obj)
+                        logger.info(
+                            f"Clonado: {len(created)} archivos cargados (heartbeat)"
+                        )
 
             if created:
                 project.lenguaje = detector.detect_project_language(created)
@@ -283,9 +303,33 @@ class AuditOrchestrator:
                     audit, 92, steps_status,
                     f"Analizando vulnerabilidades con IA (0/{n_vulns})...", n_vulns,
                 )
-                ai_analysis = await self.ai_analyzer.analyze_vulnerabilities(
-                    all_vulns, progress_callback=report_ai_progress,
-                )
+                # Limitar el trabajo de IA: top-N hallazgos por CVSS y deadline
+                # global, para que una caída/enlentecimiento de OpenAI no deje
+                # la auditoría 'ejecutando' durante horas.
+                ai_input = all_vulns
+                if n_vulns > settings.AI_ANALYSIS_MAX_FINDINGS:
+                    ai_input = sorted(
+                        all_vulns,
+                        key=lambda v: (v.get("cvss_score") or 0),
+                        reverse=True,
+                    )[: settings.AI_ANALYSIS_MAX_FINDINGS]
+                    logger.info(
+                        f"Análisis IA limitado a {len(ai_input)}/{n_vulns} hallazgos "
+                        "(top por CVSS)"
+                    )
+                try:
+                    ai_analysis = await asyncio.wait_for(
+                        self.ai_analyzer.analyze_vulnerabilities(
+                            ai_input, progress_callback=report_ai_progress,
+                        ),
+                        timeout=settings.AI_PHASE_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        f"Fase IA excedió {settings.AI_PHASE_TIMEOUT_SECONDS}s; "
+                        "se omite el enriquecimiento IA (los hallazgos se guardan igual)"
+                    )
+                    ai_analysis = {"analysis": [], "action_plan": {}}
                 steps_status[ai_idx]["status"] = "completado"
 
             # Compliance

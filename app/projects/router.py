@@ -170,6 +170,13 @@ async def upload_project_files(
 
         service = ProjectService(db)
         result = await service.process_upload(project_id, zip_path, project_dir)
+        # El código fuente subido ya está en BD (truncado); el ZIP sobra en
+        # disco (privacidad + crecimiento del storage).
+        if os.path.exists(zip_path):
+            try:
+                os.remove(zip_path)
+            except OSError:  # en modo stream ya se borró o falló el borrado
+                pass
         return {"message": "Archivos procesados correctamente", **result}
     except ValidationException as e:
         if os.path.exists(zip_path):

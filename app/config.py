@@ -16,12 +16,22 @@ class Settings(BaseSettings):
     APP_UPLOAD_DIR: str = "./storage/uploads/temp"
     APP_MAX_UPLOAD_SIZE_MB: int = 500
 
+    # Tiempo sin progreso (heartbeat) antes de marcar una auditoría 'ejecutando'
+    # como fallida. Generoso para repos grandes contra BD remota lenta.
+    APP_AUDIT_TIMEOUT_MINUTES: int = 120
+
     # Database
     DB_HOST: str = "localhost"
     DB_PORT: int = 3306
     DB_USER: str = "root"
     DB_PASSWORD: str = ""
     DB_NAME: str = "securecode_db"
+
+    # Pool de conexiones (BD externa en hosting compartido: conexiones limitadas).
+    # El worker se lanza con valores menores vía docker-compose.
+    DATABASE_POOL_SIZE: int = 5
+    DATABASE_MAX_OVERFLOW: int = 10
+    DATABASE_CONNECT_TIMEOUT: int = 10
 
     @property
     def DATABASE_URL(self) -> str:
@@ -43,7 +53,14 @@ class Settings(BaseSettings):
     OPENAI_MAX_TOKENS: int = 4096
     OPENAI_TEMPERATURE: float = 0.1
     OPENAI_TIMEOUT_SECONDS: float = 60.0
-    OPENAI_MAX_RETRIES: int = 3
+    # Reintentos por llamada: 1 para fallar rápido en modo batch (la fase IA
+    # tiene su propio deadline global). Ajustable por entorno.
+    OPENAI_MAX_RETRIES: int = 1
+
+    # Fase de análisis IA por auditoría: top-N hallazgos por CVSS y deadline
+    # global para que una caída de OpenAI no deje la auditoría 'colgada'.
+    AI_ANALYSIS_MAX_FINDINGS: int = 40
+    AI_PHASE_TIMEOUT_SECONDS: float = 1800.0
 
     # RabbitMQ
     RABBITMQ_HOST: str = "localhost"

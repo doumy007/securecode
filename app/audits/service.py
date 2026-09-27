@@ -59,8 +59,27 @@ class AuditService:
 
     async def get_audit_progress(self, audit_id: int) -> dict:
         import json
+        from sqlalchemy import case, and_, func
         audit = await self.get_audit(audit_id)
-        vulns = await self.get_audit_vulnerabilities(audit_id)
+        # Consulta ligera de agregación (1 query) en vez de cargar todas las
+        # vulnerabilidades con sus relaciones en cada poll de progreso.
+        result = await self.db.execute(
+            select(
+                func.count(Vulnerabilidad.id),
+                func.coalesce(func.sum(case((Vulnerabilidad.cvss_score >= 9.0, 1), else_=0)), 0),
+                func.coalesce(func.sum(case((and_(Vulnerabilidad.cvss_score >= 7.0, Vulnerabilidad.cvss_score < 9.0), 1), else_=0)), 0),
+                func.coalesce(func.sum(case((and_(Vulnerabilidad.cvss_score >= 4.0, Vulnerabilidad.cvss_score < 7.0), 1), else_=0)), 0),
+                func.coalesce(func.sum(case((and_(Vulnerabilidad.cvss_score >= 0.0, Vulnerabilidad.cvss_score < 4.0), 1), else_=0)), 0),
+            ).where(Vulnerabilidad.auditoria_id == audit_id)
+        )
+        total, critical, high, medium, low = result.one()
+        severity_counts = {
+            "critical": int(critical or 0),
+            "high": int(high or 0),
+            "medium": int(medium or 0),
+            "low": int(low or 0),
+        }
+
         raw = audit.resultado_resumen
         if isinstance(raw, str):
             try: raw = json.loads(raw)
@@ -68,13 +87,6 @@ class AuditService:
         elif raw is None:
             raw = {}
         progress = raw.get("progress", {}) if isinstance(raw, dict) else {}
-        severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-        for v in vulns:
-            if v.cvss_score is not None:
-                if v.cvss_score >= 9.0: severity_counts["critical"] += 1
-                elif v.cvss_score >= 7.0: severity_counts["high"] += 1
-                elif v.cvss_score >= 4.0: severity_counts["medium"] += 1
-                else: severity_counts["low"] += 1
         frameworks = audit.frameworks or []
         if isinstance(frameworks, str):
             try: frameworks = json.loads(frameworks)
@@ -90,7 +102,7 @@ class AuditService:
             ),
             "steps": progress.get("steps", []),
             "message": progress.get("message", ""),
-            "vulnerabilities_found": len(vulns),
+            "vulnerabilities_found": int(total or 0),
             "severity": severity_counts,
             "frameworks": frameworks,
         }
@@ -173,7 +185,7 @@ class AuditService:
         await self.db.commit()
         return (result.rowcount or 0) > 0
 
-    async def watchdog_fail_stuck(self, max_minutes: int = 60) -> int:
+    async def watchdog_fail_stuck(self, max_minutes: int = 120) -> int:
         """Marca como fallidas las auditorías 'ejecutando' sin progreso reciente."""
         cutoff = datetime.datetime.utcnow() - timedelta(minutes=max_minutes)
         result = await self.db.execute(

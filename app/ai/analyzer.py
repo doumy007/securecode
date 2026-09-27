@@ -11,6 +11,11 @@ class AIAnalyzer:
     def __init__(self):
         self.client = OpenAIClient()
         self._semaphore = asyncio.Semaphore(4)
+        # Los callbacks de progreso escriben en la MISMA sesión async (commit);
+        # si varios tasks los invocan a la vez, SQLAlchemy lanza
+        # "concurrent operations are not permitted" y el hallazgo se descarta
+        # sin enriquecer. Se serializan con un lock por análisis.
+        self._progress_lock = asyncio.Lock()
 
     async def analyze_vulnerabilities(self, findings: list,
                                        progress_callback: Optional[Callable] = None) -> dict:
@@ -24,7 +29,8 @@ class AIAnalyzer:
             vuln_type = finding.get("tipo", "unknown")
             archivo = finding.get("archivo", finding.get("ruta", ""))
             if progress_callback:
-                await progress_callback(idx, total, vuln_type, archivo)
+                async with self._progress_lock:
+                    await progress_callback(idx, total, vuln_type, archivo)
             async with self._semaphore:
                 result = await self.client.combined_analysis(finding)
             analysis = result.get("analysis", {})

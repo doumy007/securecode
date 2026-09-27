@@ -5,11 +5,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import async_session_factory
 import app.models  # noqa: F401  # registra todos los modelos SQLAlchemy (mappers)
 from app.audits.service import AuditService
+from app.config import settings
 
 logger = logging.getLogger("securecode.worker")
 
 # Minutos sin progreso antes de marcar una auditoría 'ejecutando' como fallida.
-AUDIT_TIMEOUT_MINUTES = 60
+# Configurable por entorno (APP_AUDIT_TIMEOUT_MINUTES); por defecto 120 para
+# no matar auditorías grandes contra la BD remota lenta.
+AUDIT_TIMEOUT_MINUTES = settings.APP_AUDIT_TIMEOUT_MINUTES
 POLL_INTERVAL_SECONDS = 5
 
 
