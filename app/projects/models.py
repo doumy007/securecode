@@ -70,6 +70,10 @@ class ArchivoProyecto(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     proyecto_id = Column(Integer, ForeignKey("sc_proyectos.id"), nullable=False)
+    # Snapshot de código por auditoría: cada auditoría conserva sus propios
+    # archivos. auditoria_id NULL = archivos "pendientes" (recién subidos por
+    # ZIP, sin auditoría que los haya reclamado todavía) o datos legado.
+    auditoria_id = Column(Integer, nullable=True, index=True)
     ruta = Column(String(1024), nullable=False)
     hash = Column(String(64))
     tamano = Column(Integer)

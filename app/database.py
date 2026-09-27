@@ -42,6 +42,17 @@ async def init_db():
                     await conn.execute(text(f"ALTER TABLE sc_auditorias ADD COLUMN {col} {col_type}"))
                 except Exception:
                     pass
+            # Snapshot de código por auditoría: los archivos de cada auditoría se
+            # guardan por separado (auditoria_id). Los subidos por ZIP quedan
+            # 'pendientes' (NULL) hasta que una auditoría los reclama.
+            try:
+                await conn.execute(text("ALTER TABLE sc_archivos_proyecto ADD COLUMN auditoria_id INT NULL"))
+            except Exception:
+                pass
+            try:
+                await conn.execute(text("CREATE INDEX ix_sc_archivos_proyecto_auditoria ON sc_archivos_proyecto (auditoria_id)"))
+            except Exception:
+                pass
     except Exception as e:
         import logging
         logging.getLogger("securecode").warning(f"init_db (no crítico): {e}")

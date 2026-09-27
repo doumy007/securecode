@@ -25,15 +25,16 @@ class ResultAggregator:
         for finding in worker_findings:
             archivo = None
             if finding.get("archivo_ruta"):
+                # Buscar en el snapshot de código de ESTA auditoría (cada una
+                # guarda su código por separado) para no cruzarse con archivos
+                # de otras auditorías del mismo proyecto.
                 result = await self.db.execute(
                     select(ArchivoProyecto).where(
-                        ArchivoProyecto.proyecto_id == (
-                            select(Auditoria.proyecto_id).where(Auditoria.id == audit_id).scalar_subquery()
-                        ),
+                        ArchivoProyecto.auditoria_id == audit_id,
                         ArchivoProyecto.ruta == finding["archivo_ruta"],
                     )
                 )
-                archivo = result.scalar_one_or_none()
+                archivo = result.scalars().first()
 
             vuln = Vulnerabilidad(
                 auditoria_id=audit_id,

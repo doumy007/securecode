@@ -8,7 +8,7 @@ import logging
 from urllib.parse import urlparse
 from git import Repo
 from typing import Optional
-from sqlalchemy import select, text, bindparam
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 from app.projects.models import Proyecto, ArchivoProyecto
@@ -102,24 +102,15 @@ class AuditOrchestrator:
     async def _clone_and_load_files(self, audit: Auditoria, project: Proyecto) -> list[ArchivoProyecto]:
         git_url = audit.git_url
         if not git_url:
-            existing = await self.project_service.get_project_files(project.id)
-            return existing
+            # Auditoría sin origen git: analiza el snapshot de código que le
+            # corresponde (su propio lote reclamado, el ZIP pendiente, o el
+            # snapshot más reciente del proyecto). Cada auditoría conserva su
+            # código por separado.
+            return await self.project_service.get_audit_source_files(project.id, audit.id)
 
-        # El usuario asoció una URL de git a esta auditoría: SIEMPRE se clona y
-        # se reemplaza el código actual del proyecto. Antes se devolvían los
-        # archivos ya cargados del proyecto (p. ej. un ZIP subido desde el
-        # módulo Proyectos) sin mirar el git_url, así que una auditoría lanzada
-        # desde el módulo Auditorías con una URL git re-analizaba código viejo
-        # y entregaba el mismo resultado que la del módulo Proyecto.
-        # Los archivos previos se conservan hasta que el clon termina OK: si la
-        # URL falla, la auditoría queda "fallida" con el error claro y el
-        # proyecto no pierde su último código.
-        old_ids = (
-            await self.db.execute(
-                select(ArchivoProyecto.id).where(ArchivoProyecto.proyecto_id == project.id)
-            )
-        ).scalars().all()
-
+        # El usuario asoció una URL de git a esta auditoría: SIEMPRE se clona.
+        # El clon se guarda como snapshot PROPIO de la auditoría (auditoria_id),
+        # sin tocar los archivos de otras auditorías ni sus vulnerabilidades.
         auth_url = self._build_auth_url(git_url, audit.git_username or "", audit.git_token or "")
 
         loop = asyncio.get_event_loop()
@@ -166,6 +157,7 @@ class AuditOrchestrator:
                     contenido = encoded.decode('utf-8', errors='replace')
                     archivo = ArchivoProyecto(
                         proyecto_id=project.id,
+                        auditoria_id=audit.id,
                         ruta=rel_path.replace("\\", "/"),
                         hash=file_hash,
                         tamano=len(raw),
@@ -196,28 +188,19 @@ class AuditOrchestrator:
                 project.estado = "en_revision"
 
             await self.db.commit()
-            logger.info(f"Clonado completado: {len(created)} archivos")
+            logger.info(f"Clonado completado: {len(created)} archivos para auditoría {audit.id}")
 
-            # El clon reemplaza el código del proyecto. Se eliminan los archivos
-            # previos desligando antes las vulnerabilidades antiguas que
-            # referencian esos archivos (FK sc_vulnerabilidades.archivo_id ->
-            # sc_archivos_proyecto); el hallazgo conserva su snippet en
-            # codigo_vulnerable.
-            if created and old_ids:
-                await self.db.execute(
-                    text(
-                        "UPDATE sc_vulnerabilidades SET archivo_id = NULL "
-                        "WHERE archivo_id IN :ids"
-                    ).bindparams(bindparam("ids", expanding=True)),
-                    {"ids": old_ids},
-                )
-                await self.db.execute(
-                    text("DELETE FROM sc_archivos_proyecto WHERE id IN :ids")
-                    .bindparams(bindparam("ids", expanding=True)),
-                    {"ids": old_ids},
-                )
-                await self.db.commit()
-                logger.info(f"Clonado reemplazó {len(old_ids)} archivos previos del proyecto")
+            # Limpieza solo de pendientes huérfanos sin referencias (ZIP subido
+            # nunca auditado). Los snapshots de otras auditorías se conservan.
+            await self.db.execute(
+                text(
+                    "DELETE FROM sc_archivos_proyecto "
+                    "WHERE proyecto_id = :pid AND auditoria_id IS NULL "
+                    "AND id NOT IN (SELECT archivo_id FROM sc_vulnerabilidades WHERE archivo_id IS NOT NULL)"
+                ),
+                {"pid": project.id},
+            )
+            await self.db.commit()
 
             return created
 

@@ -190,10 +190,25 @@ async def delete_audit(
     service = AuditService(db)
     await ensure_audit_access(db, audit_id, current_user)
     audit = await service.get_audit(audit_id)
+    proyecto_id = audit.proyecto_id
     await db.delete(audit)
+    await db.commit()
+    # Libera el snapshot de código de la auditoría borrada (ya sin sus
+    # vulnerabilidades). Solo se eliminan filas que ninguna otra auditoría
+    # siga referenciando por archivo.
+    await db.execute(
+        text(
+            "DELETE FROM sc_archivos_proyecto "
+            "WHERE auditoria_id = :aid "
+            "AND id NOT IN (SELECT archivo_id FROM sc_vulnerabilidades WHERE archivo_id IS NOT NULL)"
+        ),
+        {"aid": audit_id},
+    )
     await db.commit()
     cache.clear_prefix("audits:list:")
     cache.clear_prefix("dash:")
+    if proyecto_id:
+        cache.clear_prefix(f"projects:list:")
 
 
 @router.get("/{audit_id}/vulnerabilities", response_model=List[VulnerabilidadResponse])

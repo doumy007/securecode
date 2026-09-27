@@ -31,6 +31,21 @@ class AuditService:
             git_token=git_token,
         )
         self.db.add(audit)
+        await self.db.flush()
+        if not git_url:
+            # Reclama el lote de archivos pendientes (ZIP recién subido) para
+            # esta auditoría: cada auditoría guarda su propio snapshot de
+            # código y las auditorías anteriores se conservan. Se excluyen los
+            # archivos ya referenciados por vulnerabilidades (legado) para no
+            # arrancárselos a otras auditorías.
+            await self.db.execute(
+                text(
+                    "UPDATE sc_archivos_proyecto SET auditoria_id = :aid "
+                    "WHERE proyecto_id = :pid AND auditoria_id IS NULL "
+                    "AND id NOT IN (SELECT archivo_id FROM sc_vulnerabilidades WHERE archivo_id IS NOT NULL)"
+                ),
+                {"aid": audit.id, "pid": proyecto_id},
+            )
         await self.db.commit()
         await self.db.refresh(audit)
         return audit

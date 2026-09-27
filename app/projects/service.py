@@ -4,7 +4,7 @@ import hashlib
 import shutil
 import tempfile
 from typing import Optional
-from sqlalchemy import select, func, text
+from sqlalchemy import select, func, text, bindparam
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.projects.models import Proyecto, ArchivoProyecto, Lenguaje, Framework, EstadoProyecto
 from app.projects.detector import LanguageDetector
@@ -91,12 +91,35 @@ class ProjectService:
     async def _attach_counts(self, projects: list[Proyecto]) -> tuple:
         from app.audits.models import Auditoria
         ids = [p.id for p in projects]
+        # "Archivos" del proyecto = código actual: el snapshot más reciente
+        # (reclamado por una auditoría) o, si no hay, el lote pendiente (NULL).
         file_counts = dict(
             (
                 await self.db.execute(
-                    select(ArchivoProyecto.proyecto_id, func.count())
-                    .where(ArchivoProyecto.proyecto_id.in_(ids))
-                    .group_by(ArchivoProyecto.proyecto_id)
+                    text(
+                        """
+                        SELECT f.proyecto_id, COUNT(*) FROM sc_archivos_proyecto f
+                        WHERE f.proyecto_id IN :ids
+                          AND (
+                            f.auditoria_id = (
+                              SELECT f2.auditoria_id FROM sc_archivos_proyecto f2
+                              WHERE f2.proyecto_id = f.proyecto_id
+                                AND f2.auditoria_id IS NOT NULL
+                              ORDER BY f2.id DESC LIMIT 1
+                            )
+                            OR (
+                              f.auditoria_id IS NULL
+                              AND NOT EXISTS (
+                                SELECT 1 FROM sc_archivos_proyecto f3
+                                WHERE f3.proyecto_id = f.proyecto_id
+                                  AND f3.auditoria_id IS NOT NULL
+                              )
+                            )
+                          )
+                        GROUP BY f.proyecto_id
+                        """
+                    ).bindparams(bindparam("ids", expanding=True)),
+                    {"ids": ids},
                 )
             ).all()
         )
@@ -111,11 +134,43 @@ class ProjectService:
         )
         return projects, file_counts, audit_counts
 
+    async def _current_snapshot_auditoria_id(self, project_id: int) -> Optional[int]:
+        """auditoria_id del snapshot más reciente del proyecto, o None."""
+        return (
+            await self.db.execute(
+                select(ArchivoProyecto.auditoria_id)
+                .where(
+                    ArchivoProyecto.proyecto_id == project_id,
+                    ArchivoProyecto.auditoria_id.isnot(None),
+                )
+                .order_by(ArchivoProyecto.id.desc())
+                .limit(1)
+            )
+        ).scalar()
+
     async def count_project_files(self, project_id: int) -> int:
         result = await self.db.execute(
-            select(func.count()).select_from(ArchivoProyecto).where(
-                ArchivoProyecto.proyecto_id == project_id
-            )
+            text(
+                """
+                SELECT COUNT(*) FROM sc_archivos_proyecto f
+                WHERE f.proyecto_id = :pid
+                  AND (
+                    f.auditoria_id = (
+                      SELECT f2.auditoria_id FROM sc_archivos_proyecto f2
+                      WHERE f2.proyecto_id = :pid AND f2.auditoria_id IS NOT NULL
+                      ORDER BY f2.id DESC LIMIT 1
+                    )
+                    OR (
+                      f.auditoria_id IS NULL
+                      AND NOT EXISTS (
+                        SELECT 1 FROM sc_archivos_proyecto f3
+                        WHERE f3.proyecto_id = :pid AND f3.auditoria_id IS NOT NULL
+                      )
+                    )
+                  )
+                """
+            ),
+            {"pid": project_id},
         )
         return result.scalar() or 0
 
@@ -129,7 +184,14 @@ class ProjectService:
         return result.scalar() or 0
 
     async def list_files_meta(self, project_id: int) -> list[ArchivoProyecto]:
-        """Solo metadatos de archivos (sin contenido) para listados ligeros."""
+        """Metadatos (sin contenido) del código actual del proyecto:
+        el snapshot más reciente, o el lote pendiente si no hay auditoría aún."""
+        latest_aid = await self._current_snapshot_auditoria_id(project_id)
+        conditions = [ArchivoProyecto.proyecto_id == project_id]
+        if latest_aid is not None:
+            conditions.append(ArchivoProyecto.auditoria_id == latest_aid)
+        else:
+            conditions.append(ArchivoProyecto.auditoria_id.is_(None))
         result = await self.db.execute(
             select(
                 ArchivoProyecto.id,
@@ -138,7 +200,7 @@ class ProjectService:
                 ArchivoProyecto.hash,
                 ArchivoProyecto.tamano,
                 ArchivoProyecto.lenguaje,
-            ).where(ArchivoProyecto.proyecto_id == project_id)
+            ).where(*conditions)
         )
         return result.all()
 
@@ -172,22 +234,21 @@ class ProjectService:
         }
         MAX_CONTENT_BYTES = 65000    # límite de la columna TEXT de MySQL
 
-        # Limpieza de subidas anteriores (idempotencia).
-        # Se borran primero las auditorías del proyecto (sus vulnerabilidades
-        # referencian archivos por FK), luego los archivos.
-        from app.audits.models import Auditoria as AudMod
-        existing_audits = (
-            await self.db.execute(
-                select(AudMod).where(AudMod.proyecto_id == project_id)
-            )
-        ).scalars().all()
-        for a in existing_audits:
-            await self.db.delete(a)  # cascade: resultados, vulnerabilidades, tareas, mapeos
-        await self.db.flush()
+        # Los archivos subidos por ZIP quedan como snapshot "pendiente" (auditoria_id
+        # NULL) que la próxima auditoría sin origen git reclamará al crearse.
+        # NO se borran las auditorías existentes ni sus archivos: cada auditoría
+        # conserva su propio código y análisis por separado.
+        # Solo se limpian pendientes huérfanos SIN referencia desde alguna
+        # vulnerabilidad (los que quedaron de una subida nunca auditada).
         await self.db.execute(
-            text("DELETE FROM sc_archivos_proyecto WHERE proyecto_id = :pid"),
+            text(
+                "DELETE FROM sc_archivos_proyecto "
+                "WHERE proyecto_id = :pid AND auditoria_id IS NULL "
+                "AND id NOT IN (SELECT archivo_id FROM sc_vulnerabilidades WHERE archivo_id IS NOT NULL)"
+            ),
             {"pid": project_id},
         )
+        await self.db.flush()
 
         def is_binary(raw: bytes) -> bool:
             return b"\x00" in raw[:8192]
@@ -293,14 +354,58 @@ class ProjectService:
         )
         return result.scalars().all()
 
+    async def get_audit_source_files(self, project_id: int, audit_id: int) -> list[ArchivoProyecto]:
+        """Código que debe analizar una auditoría SIN origen git:
+        1) su propio snapshot (reclamado al crearse); 2) si no, el lote
+        pendiente (ZIP subido aún sin auditoría) -> se reclama para esta
+        auditoría; 3) si no, el snapshot más reciente del proyecto."""
+        rows = (
+            await self.db.execute(
+                select(ArchivoProyecto).where(
+                    ArchivoProyecto.proyecto_id == project_id,
+                    ArchivoProyecto.auditoria_id == audit_id,
+                )
+            )
+        ).scalars().all()
+        if rows:
+            return rows
+
+        from app.audits.models import Vulnerabilidad
+        rows = (
+            await self.db.execute(
+                select(ArchivoProyecto).where(
+                    ArchivoProyecto.proyecto_id == project_id,
+                    ArchivoProyecto.auditoria_id.is_(None),
+                    ArchivoProyecto.id.not_in(
+                        select(Vulnerabilidad.archivo_id).where(
+                            Vulnerabilidad.archivo_id.isnot(None)
+                        )
+                    ),
+                )
+            )
+        ).scalars().all()
+        if rows:
+            ids = [r.id for r in rows]
+            await self.db.execute(
+                text("UPDATE sc_archivos_proyecto SET auditoria_id = :aid WHERE id IN :ids")
+                .bindparams(bindparam("ids", expanding=True)),
+                {"aid": audit_id, "ids": ids},
+            )
+            await self.db.commit()
+            return rows
+
+        latest_aid = await self._current_snapshot_auditoria_id(project_id)
+        if latest_aid is None:
+            return []
+        return (
+            await self.db.execute(
+                select(ArchivoProyecto).where(ArchivoProyecto.auditoria_id == latest_aid)
+            )
+        ).scalars().all()
+
     async def get_project_stats(self, project_id: int) -> dict:
         project = await self.get_project(project_id)
-        result = await self.db.execute(
-            select(func.count()).select_from(ArchivoProyecto).where(
-                ArchivoProyecto.proyecto_id == project_id
-            )
-        )
-        total_files = result.scalar()
+        total_files = await self.count_project_files(project_id)
 
         auditorias = await self.get_project_auditorias(project_id)
         return {

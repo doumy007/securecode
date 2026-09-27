@@ -363,17 +363,6 @@ function toggleUploadMode() {
 async function uploadProject(id, inputEl) {
   const input = inputEl || document.getElementById("upload-input");
   if (!input.files.length) return alert("Selecciona un archivo ZIP");
-  try {
-    const proj = await api("GET", `/projects/${id}`);
-    const nAudits = Number(proj.auditorias_count || 0);
-    if (nAudits > 0) {
-      const ok = confirm(
-        `Este proyecto tiene ${nAudits} auditoría(s) guardada(s). ` +
-        "Re-subir el ZIP ELIMINARÁ esas auditorías y sus vulnerabilidades. ¿Continuar?"
-      );
-      if (!ok) return false;
-    }
-  } catch {}
   const form = new FormData();
   form.append("file", input.files[0]);
   try {
