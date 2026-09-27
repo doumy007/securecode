@@ -16,11 +16,16 @@ logger = logging.getLogger("securecode.projects")
 
 
 def sql_quote(value) -> str:
-    """Escapa un valor para un literal SQL (INSERTs masivos multi-VALUES)."""
+    """Escapa un valor para un literal SQL (INSERTs masivos multi-VALUES).
+
+    Se escapan \\, ' y %: pymysql interpola el SQL con % (aunque no haya
+    parámetros), así que un '%' literal del contenido rompería el INSERT
+    ("not enough arguments for format string"). %% llega a MySQL como %.
+    """
     if value is None:
         return "NULL"
     s = str(value)
-    return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    return "'" + s.replace("\\", "\\\\").replace("%", "%%").replace("'", "\\'") + "'"
 
 
 def chunk_for_insert(files, max_rows=100, max_bytes=4 * 1024 * 1024):
