@@ -155,14 +155,14 @@ class AuditOrchestrator:
                             continue  # binario
                         if len(raw) > 20 * 1024 * 1024:
                             continue  # demasiado grande
-                        text = raw.decode('utf-8', errors='replace')
+                        contenido_text = raw.decode('utf-8', errors='replace')
                     except Exception:
                         continue
                     rel_path = os.path.relpath(full_path, clone_dir)
                     file_hash = hashlib.sha256(raw).hexdigest()
                     lenguaje = detector.detect_language(rel_path)
                     MAX_BYTES = 65000
-                    encoded = text.encode('utf-8')[:MAX_BYTES]
+                    encoded = contenido_text.encode('utf-8')[:MAX_BYTES]
                     contenido = encoded.decode('utf-8', errors='replace')
                     archivo = ArchivoProyecto(
                         proyecto_id=project.id,
