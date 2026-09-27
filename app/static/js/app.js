@@ -160,17 +160,63 @@ async function renderDashboard(ct) {
     const sev = await api("GET", "/dashboard/vulnerabilities-by-severity");
     new Chart(document.getElementById("chart-severity"), {
       type: "doughnut",
-      data: { labels: Object.keys(sev), datasets: [{ data: Object.values(sev), backgroundColor: ["#2b8755", "#e8b931", "#d43f52", "#7b4fbf"] }] },
-      options: { responsive: true, plugins: { legend: { position: "bottom", labels: { boxWidth: 10, padding: 8 } } } },
+      data: {
+        labels: sev.labels || ["Crítica", "Alta", "Media", "Baja"],
+        datasets: [{ data: sev.series || [], backgroundColor: sev.colors || ["#d43f52", "#e8b931", "#2b8755", "#7b4fbf"] }],
+      },
+      options: { responsive: true, cutout: "62%", plugins: { legend: { position: "bottom", labels: { boxWidth: 10, padding: 8 } } } },
     });
   } catch {}
   try {
     const trend = await api("GET", "/dashboard/trends");
-    new Chart(document.getElementById("chart-trend"), {
-      type: "line",
-      data: { labels: Object.keys(trend), datasets: [{ label: "Auditorías", data: Object.values(trend), borderColor: "#5a6d80", backgroundColor: "rgba(90,109,128,.08)", fill: true, tension: .3 }] },
-      options: { responsive: true, plugins: { legend: { display: false } }, scales: { x: { grid: { color: "rgba(255,255,255,.04)" } }, y: { grid: { color: "rgba(255,255,255,.04)" }, beginAtZero: true } } },
-    });
+    if (trend.dates && trend.dates.length) {
+      new Chart(document.getElementById("chart-trend"), {
+        type: "line",
+        data: {
+          labels: trend.dates,
+          datasets: [
+            { label: "Auditorías", data: trend.audits, borderColor: "#5a6d80", backgroundColor: "rgba(90,109,128,.08)", fill: true, tension: .3 },
+            { label: "Vulnerabilidades", data: trend.vulnerabilities, borderColor: "#e8b931", backgroundColor: "rgba(232,185,49,.08)", fill: true, tension: .3, borderDash: [4, 3] },
+          ],
+        },
+        options: { responsive: true, plugins: { legend: { position: "bottom", labels: { boxWidth: 10, padding: 8 } } }, scales: { x: { grid: { color: "rgba(255,255,255,.04)" } }, y: { grid: { color: "rgba(255,255,255,.04)" }, beginAtZero: true } } },
+      });
+    }
+  } catch {}
+  try {
+    const byProj = await api("GET", "/dashboard/vulnerabilities-by-project");
+    const el = document.getElementById("chart-project");
+    if (byProj && byProj.length) {
+      const max = Math.max(...byProj.map(p => p.total), 1);
+      new Chart(el, {
+        type: "bar",
+        data: {
+          labels: byProj.map(p => p.nombre),
+          datasets: [{
+            label: "Vulnerabilidades",
+            data: byProj.map(p => p.total),
+            // Rojo = peor (≥50% del máximo), ámbar (≥20%), azul el resto
+            backgroundColor: byProj.map(p => p.total >= max * .5 ? "rgba(220,53,69,.85)" : p.total >= max * .2 ? "rgba(232,185,49,.85)" : "rgba(13,110,253,.8)"),
+            borderRadius: 3,
+          }],
+        },
+        options: {
+          indexAxis: "y",
+          responsive: true,
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: { label: c => ` ${c.parsed.x} vulnerabilidades` } },
+          },
+          scales: {
+            x: { beginAtZero: true, grid: { color: "rgba(255,255,255,.04)" } },
+            y: { grid: { color: "rgba(255,255,255,.04)" } },
+          },
+        },
+      });
+      document.getElementById("dash-proj-chart-note").textContent = `${byProj.length} proyecto(s)`;
+    } else {
+      el.parentElement.innerHTML = '<p class="text-secondary small text-center mb-0">Sin vulnerabilidades registradas.</p>';
+    }
   } catch {}
   document.getElementById("loading-screen").classList.add("d-none");
 }
@@ -344,34 +390,117 @@ async function loadAndAudit(projectId) {
 async function renderAudits(ct) {
   ct.innerHTML = document.getElementById("tpl-audits").innerHTML;
   try {
-    const audits = await api("GET", "/audits/");
-    const list = document.getElementById("audit-list");
-    if (!audits.length) { document.getElementById("audit-empty").classList.remove("d-none"); return; }
-    document.getElementById("audit-empty").classList.add("d-none");
-    const colors = { pendiente: "warning", ejecutando: "info", completada: "success", fallida: "danger" };
-    const isAdmin = USER?.rol_nombre === "admin" || USER?.rol?.nombre === "admin";
-    list.innerHTML = audits.map(a => {
-      a.estado_color = colors[a.estado] || "secondary";
-      a.created_at = a.created_at ? new Date(a.created_at).toLocaleDateString("es-CL") : "";
-      a.proyecto_nombre = a.proyecto_nombre || "—";
-      a.nombre = a.nombre || `Auditoría #${a.id}`;
-      a.tipo = a.tipo || "automática";
-      let errMsg = "";
-      if (a.estado === "fallida" && a.resultado_resumen) {
-        try {
-          const rr = typeof a.resultado_resumen === "string" ? JSON.parse(a.resultado_resumen) : a.resultado_resumen;
-          errMsg = rr?.error || rr?.progress?.message || "";
-        } catch {}
-      }
-      a.error_msg = errMsg ? `<small class="text-danger d-block text-truncate" style="max-width:260px" title="${errMsg}"><i class="bi bi-exclamation-triangle me-1"></i>${errMsg}</small>` : "";
-      return fillTpl(document.getElementById("tpl-audit-row").innerHTML, a);
-    }).join("");
-    if (isAdmin) document.querySelectorAll(".admin-only").forEach(el => el.classList.remove("d-none"));
+    const [audits, projects] = await Promise.all([
+      api("GET", "/audits/"),
+      api("GET", "/projects").catch(() => []),
+    ]);
+    window._audits = audits;
+    window._projects = projects;
+    renderAuditGroups();
+    renderAuditFlat();
   } catch (err) {
-    document.getElementById("audit-list").innerHTML = `<p class="text-danger small">${err.message}</p>`;
+    document.getElementById("audit-projects").innerHTML = `<p class="text-danger small">${err.message}</p>`;
   }
   document.getElementById("loading-screen").classList.add("d-none");
 }
+
+const AUDIT_COLORS = { pendiente: "warning", ejecutando: "info", completada: "success", fallida: "danger" };
+
+function auditRowHtml(a) {
+  a = Object.assign({}, a); // no mutar la variable global
+  a.estado_color = AUDIT_COLORS[a.estado] || "secondary";
+  a.created_at = a.created_at ? new Date(a.created_at).toLocaleDateString("es-CL") : "";
+  a.proyecto_nombre = a.proyecto_nombre || "—";
+  a.nombre = a.nombre || `Auditoría #${a.id}`;
+  a.tipo = a.tipo || "automática";
+  let errMsg = "";
+  if (a.estado === "fallida" && a.resultado_resumen) {
+    try {
+      const rr = typeof a.resultado_resumen === "string" ? JSON.parse(a.resultado_resumen) : a.resultado_resumen;
+      errMsg = rr?.error || rr?.progress?.message || "";
+    } catch {}
+  }
+  a.error_msg = errMsg ? `<small class="text-danger d-block text-truncate" style="max-width:260px" title="${esc(errMsg)}"><i class="bi bi-exclamation-triangle me-1"></i>${esc(errMsg)}</small>` : "";
+  return fillTpl(document.getElementById("tpl-audit-row").innerHTML, a);
+}
+
+function renderAuditGroups() {
+  const audits = window._audits || [];
+  const projects = (window._projects || []).slice().sort((a, b) => (a.nombre || "").localeCompare(b.nombre || ""));
+  const container = document.getElementById("audit-projects");
+  const empty = document.getElementById("audit-empty");
+  if (!projects.length && !audits.length) { container.innerHTML = ""; empty.classList.remove("d-none"); return; }
+  empty.classList.add("d-none");
+
+  const isAdmin = USER?.rol_nombre === "admin" || USER?.rol?.nombre === "admin";
+  const byProj = {};
+  audits.forEach(a => { (byProj[a.proyecto_id] = byProj[a.proyecto_id] || []).push(a); });
+
+  const groups = projects.map(p => ({ id: p.id, nombre: p.nombre, audits: byProj[p.id] || [] }));
+  // Auditorías sin proyecto visible (por consistencia de permisos): grupo "Otros"
+  const orphan = audits.filter(a => !projects.some(p => p.id === a.proyecto_id));
+  if (orphan.length) groups.push({ id: null, nombre: "Otras auditorías", audits: orphan });
+
+  container.innerHTML = groups.map(g => {
+    const n = g.audits.length;
+    const completed = g.audits.filter(a => a.estado === "completada").length;
+    const active = g.audits.filter(a => a.estado === "ejecutando" || a.estado === "pendiente").length;
+    const failed = g.audits.filter(a => a.estado === "fallida").length;
+    const badgeClass = n ? "bg-primary-subtle text-primary" : "bg-secondary-subtle text-secondary";
+    const rows = n
+      ? g.audits.map(a => auditRowHtml(a)).join("")
+      : `<p class="text-secondary small text-center py-2 mb-0">Sin auditorías</p>`;
+    return `
+      <div class="card mb-2 audit-project-group">
+        <div class="card-body p-3 audit-project-header" style="cursor:pointer" onclick="toggleAuditGroup(this)">
+          <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+            <div class="d-flex align-items-center gap-2" style="min-width:0">
+              <i class="bi bi-journal-code text-primary"></i>
+              <h6 class="mb-0 small text-truncate">${esc(g.nombre)}</h6>
+            </div>
+            <div class="d-flex align-items-center gap-2 flex-shrink-0">
+              <span class="badge ${badgeClass}">${n} auditoría${n === 1 ? "" : "s"}</span>
+              ${completed ? `<span class="badge bg-success-subtle text-success">${completed} OK</span>` : ""}
+              ${active ? `<span class="badge bg-info-subtle text-info">${active} en curso</span>` : ""}
+              ${failed ? `<span class="badge bg-danger-subtle text-danger">${failed} fallidas</span>` : ""}
+              <i class="bi bi-chevron-down text-secondary proj-chevron"></i>
+            </div>
+          </div>
+        </div>
+        <div class="audit-project-body" style="display:none;border-top:1px solid rgba(255,255,255,.08)">
+          <div class="p-2">${rows}</div>
+        </div>
+      </div>`;
+  }).join("");
+  if (isAdmin) container.querySelectorAll(".admin-only").forEach(el => el.classList.remove("d-none"));
+}
+
+function renderAuditFlat() {
+  const audits = window._audits || [];
+  const list = document.getElementById("audit-list");
+  const empty = document.getElementById("audit-empty");
+  const isAdmin = USER?.rol_nombre === "admin" || USER?.rol?.nombre === "admin";
+  list.innerHTML = audits.map(a => auditRowHtml(a)).join("");
+  if (isAdmin) list.querySelectorAll(".admin-only").forEach(el => el.classList.remove("d-none"));
+}
+
+function toggleAuditView() {
+  const mode = document.querySelector('input[name="audit-view"]:checked')?.value || "group";
+  document.getElementById("audit-projects").classList.toggle("d-none", mode !== "group");
+  document.getElementById("audit-list").classList.toggle("d-none", mode !== "flat");
+}
+
+window.toggleAuditGroup = function(header) {
+  const body = header.nextElementSibling;
+  const chevron = header.querySelector(".proj-chevron");
+  if (!body) return;
+  const hidden = body.style.display === "none";
+  body.style.display = hidden ? "block" : "none";
+  if (chevron) {
+    chevron.classList.toggle("bi-chevron-down", !hidden);
+    chevron.classList.toggle("bi-chevron-up", hidden);
+  }
+};
 
 async function showNewAudit() {
   try { window._projects = await api("GET", "/projects"); } catch {}

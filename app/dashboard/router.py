@@ -33,6 +33,18 @@ async def get_vuln_by_severity(
     return await service.get_vulnerability_by_severity(current_user.id)
 
 
+@router.get("/vulnerabilities-by-project")
+async def get_vulns_by_project(
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(get_current_active_user),
+):
+    service = DashboardService(db)
+    is_admin = await service._is_admin_role(current_user.id)
+    if is_admin:
+        return await service.get_vulnerabilities_by_project()
+    return await service.get_vulnerabilities_by_project(current_user.id)
+
+
 @router.get("/trends")
 async def get_trends(
     db: AsyncSession = Depends(get_db),

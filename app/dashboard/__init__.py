@@ -118,6 +118,33 @@ class DashboardService:
             "vulnerabilities": vulnerabilities,
         }
 
+    async def get_vulnerabilities_by_project(self, user_id: Optional[int] = None) -> list:
+        # Vulnerabilidades por proyecto en una sola agregación SQL (LEFT JOIN
+        # para incluir proyectos sin vulnerabilidades con total 0), ordenado
+        # de mayor a menor. OJO: el filtro por usuario va dentro de la JOIN,
+        # no en WHERE, para no descartar proyectos sin auditorías del usuario.
+        # No-admin: el filtro de auditorías va DENTRO de la JOIN (para no
+        # descartar proyectos sin auditorías del usuario) y además se limita
+        # a sus propios proyectos, igual que el endpoint /projects.
+        audit_cond = Auditoria.proyecto_id == Proyecto.id
+        if user_id:
+            audit_cond = and_(audit_cond, Auditoria.user_id == user_id)
+        query = (
+            select(Proyecto.id, Proyecto.nombre, func.count(Vulnerabilidad.id).label("total"))
+            .select_from(Proyecto)
+            .outerjoin(Auditoria, audit_cond)
+            .outerjoin(Vulnerabilidad, Vulnerabilidad.auditoria_id == Auditoria.id)
+            .group_by(Proyecto.id, Proyecto.nombre)
+            .order_by(func.count(Vulnerabilidad.id).desc())
+        )
+        if user_id:
+            query = query.where(Proyecto.user_id == user_id)
+        rows = (await self.db.execute(query)).all()
+        return [
+            {"id": r.id, "nombre": r.nombre, "total": int(r.total or 0)}
+            for r in rows
+        ]
+
     async def get_compliance_radar(self) -> dict:
         return {
             "labels": ["OWASP Top 10", "NIST CSF", "NIST 800-82", "ISO 27001", "CIS Controls", "MITRE ATT&CK"],

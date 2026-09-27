@@ -166,9 +166,20 @@
     <small class="text-secondary" id="dash-date"></small>
   </div>
   <div class="row g-2 mb-3" id="dash-cards"></div>
-  <div class="row g-2">
+  <div class="row g-2 mb-2">
     <div class="col-md-8"><div class="card"><div class="card-body"><canvas id="chart-trend" height="150"></canvas></div></div></div>
     <div class="col-md-4"><div class="card"><div class="card-body"><canvas id="chart-severity" height="150"></canvas></div></div></div>
+  </div>
+  <div class="row g-2">
+    <div class="col-12">
+      <div class="card">
+        <div class="card-header p-2 d-flex justify-content-between align-items-center">
+          <small class="fw-semibold"><i class="bi bi-bar-chart me-1 text-primary"></i>Vulnerabilidades por Proyecto</small>
+          <small class="text-secondary" id="dash-proj-chart-note"></small>
+        </div>
+        <div class="card-body"><canvas id="chart-project" height="150"></canvas></div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -215,11 +226,20 @@
 </template>
 
 <template id="tpl-audits">
-  <div class="d-flex justify-content-between align-items-center mb-3">
+  <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
     <h6 class="fw-normal mb-0"><i class="bi bi-shield me-2"></i>Auditorías</h6>
-    <button class="btn btn-primary btn-sm" onclick="showNewAudit()"><i class="bi bi-plus-lg"></i> Nueva</button>
+    <div class="d-flex align-items-center gap-2">
+      <div class="btn-group btn-group-sm" role="group" aria-label="Vista">
+        <input type="radio" class="btn-check" name="audit-view" id="av-group" value="group" checked onchange="toggleAuditView()">
+        <label class="btn btn-outline-secondary" for="av-group"><i class="bi bi-folder2-open me-1"></i>Por proyecto</label>
+        <input type="radio" class="btn-check" name="audit-view" id="av-flat" value="flat" onchange="toggleAuditView()">
+        <label class="btn btn-outline-secondary" for="av-flat"><i class="bi bi-list-ul me-1"></i>Planas</label>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="showNewAudit()"><i class="bi bi-plus-lg"></i> Nueva</button>
+    </div>
   </div>
-  <div id="audit-list"></div>
+  <div id="audit-projects"></div>
+  <div id="audit-list" class="d-none"></div>
   <p id="audit-empty" class="text-secondary text-center small d-none">No hay auditorías.</p>
 </template>
 
