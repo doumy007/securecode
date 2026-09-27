@@ -15,6 +15,50 @@ import logging
 logger = logging.getLogger("securecode.projects")
 
 
+def sql_quote(value) -> str:
+    """Escapa un valor para un literal SQL (INSERTs masivos multi-VALUES)."""
+    if value is None:
+        return "NULL"
+    s = str(value)
+    return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def chunk_for_insert(files, max_rows=100, max_bytes=4 * 1024 * 1024):
+    """Divide archivos en lotes acotados por filas y por tamaño estimado para
+    no superar max_allowed_packet de MySQL en un solo INSERT multi-VALUES."""
+    current, total = [], 0
+    for f in files:
+        est = (len(f.contenido) if f.contenido else 0) + 256
+        if current and (len(current) >= max_rows or total + est > max_bytes):
+            yield current
+            current, total = [], 0
+        current.append(f)
+        total += est
+    if current:
+        yield current
+
+
+async def bulk_insert_files(db, files, proyecto_id, auditoria_id=None):
+    """INSERT en lote (multi-VALUES) para archivos de proyecto/snapshot.
+
+    La BD remota es lenta por latencia: un INSERT por fila vía ORM tardaba
+    ~0,23 s/archivo (400 archivos -> 90 s, superaba el timeout del frontend),
+    mientras que un INSERT multi-VALUES por lote termina en 1-3 s."""
+    INSERT_SQL = (
+        "INSERT INTO sc_archivos_proyecto "
+        "(proyecto_id, auditoria_id, ruta, hash, tamano, lenguaje, contenido) VALUES "
+    )
+    aid_sql = "NULL" if auditoria_id is None else str(int(auditoria_id))
+    for chunk in chunk_for_insert(files):
+        values = ",".join(
+            f"({proyecto_id}, {aid_sql}, {sql_quote(f.ruta)}, {sql_quote(f.hash)}, "
+            f"{f.tamano if f.tamano is not None else 'NULL'}, {sql_quote(f.lenguaje)}, "
+            f"{sql_quote(f.contenido)})"
+            for f in chunk
+        )
+        await db.execute(text(INSERT_SQL + values))
+
+
 class ProjectService:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -368,8 +412,12 @@ class ProjectService:
                         lenguaje=lenguaje,
                         contenido=contenido,
                     )
-                    self.db.add(archivo)
                     files.append(archivo)
+
+                # INSERT por lotes multi-VALUES (la vía ORM tarda 0,23 s/archivo
+                # contra la BD remota y un ZIP grande superaba el timeout del
+                # frontend).
+                await bulk_insert_files(self.db, files, project_id)
 
                 project.lenguaje = self.detector.detect_project_language(files)
                 project.framework = self.detector.detect_framework_from_files(files)

@@ -12,7 +12,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
 from app.projects.models import Proyecto, ArchivoProyecto
-from app.projects.service import ProjectService
+from app.projects.service import ProjectService, bulk_insert_files
 from app.projects.detector import LanguageDetector
 from app.config import settings
 from app.workers.sonarqube import SonarQubeWorker
@@ -131,6 +131,7 @@ class AuditOrchestrator:
                 "target", ".terraform", "vendor", "site-packages",
             }
             created = []
+            flushed = 0
             # Heartbeat + INSERT progresivos: con repos grandes y BD remota lenta,
             # un único commit al final podría superar el umbral del watchdog y
             # dejar la auditoría en memoria durante demasiado tiempo.
@@ -164,11 +165,16 @@ class AuditOrchestrator:
                         lenguaje=lenguaje,
                         contenido=contenido,
                     )
-                    self.db.add(archivo)
                     created.append(archivo)
                     if len(created) % BATCH == 0:
-                        # Commit visible al watchdog (heartbeat en updated_at) y
-                        # sacar del identity map los objetos ya persistidos.
+                        # INSERT por lotes (multi-VALUES) + commit visible al
+                        # watchdog (heartbeat en updated_at). La vía add() del
+                        # ORM insertaba una fila a la vez y era muy lenta contra
+                        # la BD remota.
+                        await bulk_insert_files(
+                            self.db, created[flushed:], project.id, audit.id
+                        )
+                        flushed = len(created)
                         await self.db.execute(
                             text(
                                 "UPDATE sc_auditorias SET updated_at = :ts WHERE id = :id"
@@ -176,11 +182,12 @@ class AuditOrchestrator:
                             {"id": audit.id, "ts": datetime.datetime.utcnow()},
                         )
                         await self.db.commit()
-                        for obj in created[-BATCH:]:
-                            self.db.expunge(obj)
                         logger.info(
                             f"Clonado: {len(created)} archivos cargados (heartbeat)"
                         )
+
+            if created and len(created) > flushed:
+                await bulk_insert_files(self.db, created[flushed:], project.id, audit.id)
 
             if created:
                 project.lenguaje = detector.detect_project_language(created)
