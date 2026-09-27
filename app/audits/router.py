@@ -103,6 +103,18 @@ async def get_audit_summary(
     return await service.get_audit_summary(current_user.id)
 
 
+@router.get("/frameworks")
+async def list_frameworks():
+    return [
+        {"id": "owasp", "label": "OWASP Top 10", "desc": "Seguridad en aplicaciones web"},
+        {"id": "nist_csf", "label": "NIST CSF", "desc": "Framework de Ciberseguridad"},
+        {"id": "nist_800_82", "label": "NIST SP 800-82", "desc": "Seguridad en ICS/SCADA"},
+        {"id": "iso_27001", "label": "ISO 27001", "desc": "Sistema de Gestión de Seguridad"},
+        {"id": "cis", "label": "CIS Controls v8", "desc": "Controles de seguridad críticos"},
+        {"id": "mitre_attck", "label": "MITRE ATT&CK", "desc": "Tácticas y técnicas adversariales"},
+    ]
+
+
 @router.get("/{audit_id}", response_model=AuditoriaResponse)
 async def get_audit(
     audit_id: int,
@@ -250,18 +262,6 @@ async def update_vulnerability_status(
     await ensure_audit_access(db, v.auditoria_id, current_user)
     await service.update_vulnerability_status(vuln_id, status)
     return {"message": "Estado actualizado"}
-
-
-@router.get("/frameworks")
-async def list_frameworks():
-    return [
-        {"id": "owasp", "label": "OWASP Top 10", "desc": "Seguridad en aplicaciones web"},
-        {"id": "nist_csf", "label": "NIST CSF", "desc": "Framework de Ciberseguridad"},
-        {"id": "nist_800_82", "label": "NIST SP 800-82", "desc": "Seguridad en ICS/SCADA"},
-        {"id": "iso_27001", "label": "ISO 27001", "desc": "Sistema de Gestión de Seguridad"},
-        {"id": "cis", "label": "CIS Controls v8", "desc": "Controles de seguridad críticos"},
-        {"id": "mitre_attck", "label": "MITRE ATT&CK", "desc": "Tácticas y técnicas adversariales"},
-    ]
 
 
 @router.get("/{audit_id}/report/{framework}")

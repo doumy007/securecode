@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from app.database import get_db
-from app.dependencies import get_current_active_user
+from app.dependencies import get_current_active_user, ensure_audit_access
 from app.auth.models import Usuario
 from app.ai.chat import AuditChat
 from app.audits.service import AuditService
@@ -27,8 +27,10 @@ async def audit_chat(
     current_user: Usuario = Depends(get_current_active_user),
 ):
     service = AuditService(db)
+    await ensure_audit_access(db, data.audit_id, current_user)
     audit = await service.get_audit(data.audit_id)
 
+    vulns = await service.get_audit_vulnerabilities(data.audit_id)
     audit_context = {
         "audit_id": audit.id,
         "proyecto_id": audit.proyecto_id,
@@ -45,7 +47,7 @@ async def audit_chat(
                 "codigo_vulnerable": v.codigo_vulnerable,
                 "codigo_corregido": v.codigo_corregido,
             }
-            for v in audit.vulnerabilidades
+            for v in vulns
         ],
     }
 
@@ -56,7 +58,9 @@ async def audit_chat(
 @router.post("/chat/clear")
 async def clear_chat_history(
     audit_id: int,
+    db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_active_user),
 ):
+    await ensure_audit_access(db, audit_id, current_user)
     chat.clear_history(audit_id)
     return {"message": "Historial de chat limpiado"}
