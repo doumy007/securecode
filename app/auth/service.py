@@ -13,6 +13,7 @@ from io import BytesIO
 from app.config import settings
 from app.auth.models import Usuario, Rol
 from app.exceptions import UnauthorizedException, NotFoundException, ConflictException
+from app.shared.cache import cache
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -166,10 +167,14 @@ class AuthService:
         return totp.verify(token)
 
     async def change_password(self, user: Usuario, current_password: str, new_password: str) -> bool:
-        if not pwd_context.verify(current_password, user.password_hash):
+        # Recargar desde BD: el usuario pasado puede venir del caché
+        # (objeto desasociado cuya mutación no persistiría).
+        fresh = await self.db.get(Usuario, user.id)
+        if not pwd_context.verify(current_password, fresh.password_hash):
             raise UnauthorizedException("Contraseña actual incorrecta")
-        user.password_hash = pwd_context.hash(new_password)
+        fresh.password_hash = pwd_context.hash(new_password)
         await self.db.commit()
+        cache.clear_prefix("auth:user:")
         return True
 
     async def get_users(self, skip: int = 0, limit: int = 100) -> list[Usuario]:

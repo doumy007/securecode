@@ -91,7 +91,15 @@ document.getElementById("login-form").addEventListener("submit", async (e) => {
     if (USER.rol_nombre === "admin" || USER.rol?.nombre === "admin") {
       document.getElementById("nav-admin").classList.remove("d-none");
     }
-    location.hash = "/";
+    // No depender del evento hashchange: si el hash ya es "#/" (p. ej. tras un
+    // token expirado), asignarlo de nuevo NO dispara el evento y la página de
+    // login queda colgada. Renderizar directamente en ese caso.
+    const target = "/";
+    if (location.hash.slice(1) === target) {
+      hashRoute();
+    } else {
+      location.hash = target;
+    }
   } catch (err) {
     document.getElementById("login-alert").textContent = err.message;
     document.getElementById("login-alert").classList.remove("d-none");
@@ -140,8 +148,15 @@ async function renderDashboard(ct) {
   document.getElementById("dash-date").textContent = new Date().toLocaleDateString("es-CL", {
     weekday: "long", year: "numeric", month: "long", day: "numeric",
   });
-  try {
-    const dash = await api("GET", "/dashboard/kpi");
+  // Los 4 endpoints en paralelo (la BD remota es lenta ~0.4-0.6s/consulta):
+  // secuencialmente eran 4 round-trips seguidos, varios segundos en total.
+  const [dash, sev, trend, byProj] = await Promise.all([
+    api("GET", "/dashboard/kpi").catch(() => null),
+    api("GET", "/dashboard/vulnerabilities-by-severity").catch(() => null),
+    api("GET", "/dashboard/trends").catch(() => null),
+    api("GET", "/dashboard/vulnerabilities-by-project").catch(() => null),
+  ]);
+  if (dash) {
     document.getElementById("dash-cards").innerHTML = [
       { label: "Proyectos", icon: "bi-folder", value: dash.total_proyectos },
       { label: "Auditorías", icon: "bi-shield", value: dash.total_auditorias },
@@ -155,9 +170,8 @@ async function renderDashboard(ct) {
           <small class="text-secondary">${i.label}</small>
         </div>
       </div></div>`).join("");
-  } catch {}
-  try {
-    const sev = await api("GET", "/dashboard/vulnerabilities-by-severity");
+  }
+  if (sev) {
     new Chart(document.getElementById("chart-severity"), {
       type: "doughnut",
       data: {
@@ -166,58 +180,52 @@ async function renderDashboard(ct) {
       },
       options: { responsive: true, cutout: "62%", plugins: { legend: { position: "bottom", labels: { boxWidth: 10, padding: 8 } } } },
     });
-  } catch {}
-  try {
-    const trend = await api("GET", "/dashboard/trends");
-    if (trend.dates && trend.dates.length) {
-      new Chart(document.getElementById("chart-trend"), {
-        type: "line",
-        data: {
-          labels: trend.dates,
-          datasets: [
-            { label: "Auditorías", data: trend.audits, borderColor: "#5a6d80", backgroundColor: "rgba(90,109,128,.08)", fill: true, tension: .3 },
-            { label: "Vulnerabilidades", data: trend.vulnerabilities, borderColor: "#e8b931", backgroundColor: "rgba(232,185,49,.08)", fill: true, tension: .3, borderDash: [4, 3] },
-          ],
+  }
+  if (trend && trend.dates && trend.dates.length) {
+    new Chart(document.getElementById("chart-trend"), {
+      type: "line",
+      data: {
+        labels: trend.dates,
+        datasets: [
+          { label: "Auditorías", data: trend.audits, borderColor: "#5a6d80", backgroundColor: "rgba(90,109,128,.08)", fill: true, tension: .3 },
+          { label: "Vulnerabilidades", data: trend.vulnerabilities, borderColor: "#e8b931", backgroundColor: "rgba(232,185,49,.08)", fill: true, tension: .3, borderDash: [4, 3] },
+        ],
+      },
+      options: { responsive: true, plugins: { legend: { position: "bottom", labels: { boxWidth: 10, padding: 8 } } }, scales: { x: { grid: { color: "rgba(255,255,255,.04)" } }, y: { grid: { color: "rgba(255,255,255,.04)" }, beginAtZero: true } } },
+    });
+  }
+  if (byProj && byProj.length) {
+    const max = Math.max(...byProj.map(p => p.total), 1);
+    new Chart(document.getElementById("chart-project"), {
+      type: "bar",
+      data: {
+        labels: byProj.map(p => p.nombre),
+        datasets: [{
+          label: "Vulnerabilidades",
+          data: byProj.map(p => p.total),
+          // Rojo = peor (≥50% del máximo), ámbar (≥20%), azul el resto
+          backgroundColor: byProj.map(p => p.total >= max * .5 ? "rgba(220,53,69,.85)" : p.total >= max * .2 ? "rgba(232,185,49,.85)" : "rgba(13,110,253,.8)"),
+          borderRadius: 3,
+        }],
+      },
+      options: {
+        indexAxis: "y",
+        responsive: true,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: c => ` ${c.parsed.x} vulnerabilidades` } },
         },
-        options: { responsive: true, plugins: { legend: { position: "bottom", labels: { boxWidth: 10, padding: 8 } } }, scales: { x: { grid: { color: "rgba(255,255,255,.04)" } }, y: { grid: { color: "rgba(255,255,255,.04)" }, beginAtZero: true } } },
-      });
-    }
-  } catch {}
-  try {
-    const byProj = await api("GET", "/dashboard/vulnerabilities-by-project");
+        scales: {
+          x: { beginAtZero: true, grid: { color: "rgba(255,255,255,.04)" } },
+          y: { grid: { color: "rgba(255,255,255,.04)" } },
+        },
+      },
+    });
+    document.getElementById("dash-proj-chart-note").textContent = `${byProj.length} proyecto(s)`;
+  } else if (byProj !== null) {
     const el = document.getElementById("chart-project");
-    if (byProj && byProj.length) {
-      const max = Math.max(...byProj.map(p => p.total), 1);
-      new Chart(el, {
-        type: "bar",
-        data: {
-          labels: byProj.map(p => p.nombre),
-          datasets: [{
-            label: "Vulnerabilidades",
-            data: byProj.map(p => p.total),
-            // Rojo = peor (≥50% del máximo), ámbar (≥20%), azul el resto
-            backgroundColor: byProj.map(p => p.total >= max * .5 ? "rgba(220,53,69,.85)" : p.total >= max * .2 ? "rgba(232,185,49,.85)" : "rgba(13,110,253,.8)"),
-            borderRadius: 3,
-          }],
-        },
-        options: {
-          indexAxis: "y",
-          responsive: true,
-          plugins: {
-            legend: { display: false },
-            tooltip: { callbacks: { label: c => ` ${c.parsed.x} vulnerabilidades` } },
-          },
-          scales: {
-            x: { beginAtZero: true, grid: { color: "rgba(255,255,255,.04)" } },
-            y: { grid: { color: "rgba(255,255,255,.04)" } },
-          },
-        },
-      });
-      document.getElementById("dash-proj-chart-note").textContent = `${byProj.length} proyecto(s)`;
-    } else {
-      el.parentElement.innerHTML = '<p class="text-secondary small text-center mb-0">Sin vulnerabilidades registradas.</p>';
-    }
-  } catch {}
+    if (el) el.parentElement.innerHTML = '<p class="text-secondary small text-center mb-0">Sin vulnerabilidades registradas.</p>';
+  }
   document.getElementById("loading-screen").classList.add("d-none");
 }
 
@@ -276,8 +284,11 @@ async function showProjectDetail(projectId) {
   document.getElementById("detail-body").innerHTML = '<div class="text-center py-3"><div class="spinner-border spinner-border-sm text-secondary"></div> Cargando...</div>';
   modal.show();
   try {
-    const stats = await api("GET", `/projects/${projectId}/stats`);
-    const files = await api("GET", `/projects/${projectId}/files`);
+    const [stats, files, audits] = await Promise.all([
+      api("GET", `/projects/${projectId}/stats`),
+      api("GET", `/projects/${projectId}/files`),
+      api("GET", `/projects/${projectId}/audits`).catch(() => []),
+    ]);
     let frameworks = [];
     try { frameworks = await api("GET", "/audits/frameworks"); } catch {}
     const defaultFws = [{id:"owasp",label:"OWASP Top 10"},{id:"nist_csf",label:"NIST CSF"},{id:"iso_27001",label:"ISO 27001"},{id:"cis",label:"CIS Controls"},{id:"mitre_attck",label:"MITRE ATT&CK"}];
@@ -293,6 +304,18 @@ async function showProjectDetail(projectId) {
         <div class="col-4"><div class="card border-secondary text-center p-2"><small class="text-secondary">Auditorías</small><b>${stats.total_audits}</b></div></div>
         <div class="col-4"><div class="card border-secondary text-center p-2"><small class="text-secondary">Lenguaje</small><b>${stats.lenguaje}</b></div></div>
       </div>
+      <h6 class="small text-secondary mb-2"><i class="bi bi-shield me-1"></i>Auditorías del proyecto</h6>
+      ${audits.length ? `<div class="mb-3 small">${audits.map(a => {
+        const stBadge = { pendiente: "warning", ejecutando: "info", completada: "success", fallida: "danger" }[a.estado] || "secondary";
+        return `<div class="d-flex justify-content-between align-items-center py-1 px-2 border border-secondary-subtle rounded mb-1" onclick="openAuditFromProject(${a.id})" style="cursor:pointer" title="Ver informe de la auditoría">
+          <span class="fw-semibold text-truncate me-2"><i class="bi bi-bug me-1 text-primary"></i>${esc(a.nombre)}</span>
+          <span class="d-flex align-items-center gap-2 flex-shrink-0">
+            <span class="badge bg-${stBadge}">${esc(a.estado)}</span>
+            <small class="text-secondary">${a.vulnerabilities_count} vuln.</small>
+          </span>
+        </div>`;
+      }).join("")}</div>`
+        : '<p class="text-secondary small mb-3">Sin auditorías aún. Carga el código y usa el botón de abajo para lanzar la primera.</p>'}
       <h6 class="small text-secondary mb-2">Archivos</h6>
       ${files.length ? `<ul class="list-group list-group-flush small">${files.map(f => `<li class="list-group-item bg-transparent border-secondary py-1 px-2">${f.ruta} <span class="text-secondary">(${f.lenguaje})</span></li>`).join("")}</ul>`
         : '<p class="text-secondary small">Sin archivos.</p>'}
@@ -323,6 +346,12 @@ async function showProjectDetail(projectId) {
   } catch (err) {
     document.getElementById("detail-body").innerHTML = `<p class="text-danger small">${err.message}</p>`;
   }
+}
+
+function openAuditFromProject(auditId) {
+  const modal = bootstrap.Modal.getInstance(document.getElementById("detail-modal"));
+  if (modal) modal.hide();
+  showAuditDetail(auditId);
 }
 
 function toggleUploadMode() {
@@ -389,19 +418,21 @@ async function loadAndAudit(projectId) {
 // ---------- AUDITS ----------
 async function renderAudits(ct) {
   ct.innerHTML = document.getElementById("tpl-audits").innerHTML;
+  // Los proyectos se piden en paralelo, pero la vista por grupos no debe
+  // bloquear la lista plana: si /projects es lento, la lista flat ya se ve.
+  const projectsP = api("GET", "/projects").catch(() => []);
   try {
-    const [audits, projects] = await Promise.all([
-      api("GET", "/audits/"),
-      api("GET", "/projects").catch(() => []),
-    ]);
-    window._audits = audits;
-    window._projects = projects;
-    renderAuditGroups();
+    window._audits = await api("GET", "/audits/");
     renderAuditFlat();
+    document.getElementById("loading-screen").classList.add("d-none");
   } catch (err) {
+    document.getElementById("audit-list").innerHTML = `<p class="text-danger small">${err.message}</p>`;
     document.getElementById("audit-projects").innerHTML = `<p class="text-danger small">${err.message}</p>`;
+    document.getElementById("loading-screen").classList.add("d-none");
+    return;
   }
-  document.getElementById("loading-screen").classList.add("d-none");
+  window._projects = await projectsP;
+  renderAuditGroups();
 }
 
 const AUDIT_COLORS = { pendiente: "warning", ejecutando: "info", completada: "success", fallida: "danger" };

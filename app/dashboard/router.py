@@ -15,7 +15,7 @@ async def get_dashboard_kpi(
     current_user: Usuario = Depends(get_current_active_user),
 ):
     service = DashboardService(db)
-    is_admin = await service._is_admin_role(current_user.id)
+    is_admin = current_user.rol.nombre == "admin"
     if is_admin:
         return await service.get_kpi()
     return await service.get_kpi(current_user.id)
@@ -27,7 +27,7 @@ async def get_vuln_by_severity(
     current_user: Usuario = Depends(get_current_active_user),
 ):
     service = DashboardService(db)
-    is_admin = await service._is_admin_role(current_user.id)
+    is_admin = current_user.rol.nombre == "admin"
     if is_admin:
         return await service.get_vulnerability_by_severity()
     return await service.get_vulnerability_by_severity(current_user.id)
@@ -39,7 +39,7 @@ async def get_vulns_by_project(
     current_user: Usuario = Depends(get_current_active_user),
 ):
     service = DashboardService(db)
-    is_admin = await service._is_admin_role(current_user.id)
+    is_admin = current_user.rol.nombre == "admin"
     if is_admin:
         return await service.get_vulnerabilities_by_project()
     return await service.get_vulnerabilities_by_project(current_user.id)
@@ -51,7 +51,7 @@ async def get_trends(
     current_user: Usuario = Depends(get_current_active_user),
 ):
     service = DashboardService(db)
-    is_admin = await service._is_admin_role(current_user.id)
+    is_admin = current_user.rol.nombre == "admin"
     if is_admin:
         return await service.get_trends()
     return await service.get_trends(current_user.id)

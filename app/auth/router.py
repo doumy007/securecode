@@ -12,6 +12,7 @@ from app.dependencies import get_current_active_user, require_role, require_perm
 from app.auth.models import Usuario
 from app.config import settings
 from app.shared.rate_limit import LoginRateLimiter
+from app.shared.cache import cache
 
 router = APIRouter()
 
@@ -110,7 +111,10 @@ async def setup_mfa(
     db: AsyncSession = Depends(get_db),
 ):
     service = AuthService(db)
-    result = service.setup_mfa(current_user)
+    # El usuario del dependency puede venir del caché (objeto desasociado):
+    # mutarlo no persistiría. Operar sobre una instancia fresca de BD.
+    fresh = await db.get(Usuario, current_user.id)
+    result = service.setup_mfa(fresh)
     await db.commit()
     return result
 
@@ -122,10 +126,11 @@ async def verify_mfa(
     db: AsyncSession = Depends(get_db),
 ):
     service = AuthService(db)
-    verified = service.verify_mfa_token(current_user, data.token)
+    fresh = await db.get(Usuario, current_user.id)
+    verified = service.verify_mfa_token(fresh, data.token)
     if not verified:
         raise HTTPException(status_code=400, detail="Token MFA inválido")
-    current_user.mfa_enabled = True
+    fresh.mfa_enabled = True
     await db.commit()
     return MFAVerifyResponse(verified=True, recovery_codes=[])
 
@@ -135,11 +140,9 @@ async def get_me(
     current_user: Usuario = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
-    from sqlalchemy import select
-    from app.auth.models import Rol
-    result = await db.execute(select(Rol.nombre).where(Rol.id == current_user.rol_id))
-    row = result.scalar_one_or_none()
-    current_user.rol_nombre = row or "—"
+    # El rol ya viene cargado (selectinload) en el usuario; no hace falta
+    # consultar la BD remota por el nombre del rol en cada /auth/me.
+    current_user.rol_nombre = current_user.rol.nombre if current_user.rol else "—"
     return current_user
 
 
@@ -149,13 +152,23 @@ async def update_me(
     current_user: Usuario = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if data.nombre_completo:
-        current_user.nombre_completo = data.nombre_completo
-    if data.email:
-        current_user.email = data.email
+    # Usuario de BD fresco con rol cargado: el del dependency puede venir del
+    # caché (objeto desasociado cuya mutación no persistiría) y db.get() no
+    # carga la relación rol (la serialización la necesita → MissingGreenlet).
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+    result = await db.execute(
+        select(Usuario).options(selectinload(Usuario.rol)).where(Usuario.id == current_user.id)
+    )
+    fresh = result.scalar_one()
+    if data.nombre_completo is not None:
+        fresh.nombre_completo = data.nombre_completo
+    if data.email is not None:
+        fresh.email = data.email
+    fresh.rol_nombre = current_user.rol_nombre or (current_user.rol.nombre if current_user.rol else None)
     await db.commit()
-    await db.refresh(current_user)
-    return current_user
+    cache.clear_prefix("auth:user:")
+    return fresh
 
 
 @router.post("/change-password")

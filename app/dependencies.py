@@ -4,9 +4,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.auth.service import AuthService
 from app.auth.models import Usuario
+from app.shared.cache import cache
 from typing import Optional
 
 security = HTTPBearer()
+
+# La BD remota tarda ~0.4-0.6 s por consulta; resolver el usuario por token en
+# CADA request (2 consultas: usuario + rol) dominaba el tiempo de toda página.
+# Se cachea un SNAPSHOT plano del usuario (no el objeto ORM: Session.close()
+# expira los atributos y un objeto desasociado lanza DetachedInstanceError al
+# leerlos en otro request). TTL corto: cambios de rol/estado se reflejan en ≤60 s.
+AUTH_USER_TTL = 60
+
+
+class _CachedRol:
+    __slots__ = ("id", "nombre", "descripcion", "permisos")
+
+    def __init__(self, id=None, nombre="", descripcion=None, permisos=None):
+        self.id = id
+        self.nombre = nombre
+        self.descripcion = descripcion
+        self.permisos = permisos or []
+
+
+class _CachedUser:
+    __slots__ = (
+        "id", "username", "email", "password_hash", "nombre_completo", "activo",
+        "mfa_secret", "mfa_enabled", "rol_id", "ultimo_login", "created_at",
+        "updated_at", "rol", "rol_nombre", "permisos",
+    )
+
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
 
 
 async def get_current_user(
@@ -14,6 +44,10 @@ async def get_current_user(
     db: AsyncSession = Depends(get_db),
 ) -> Usuario:
     token = credentials.credentials
+    cached = cache.get(f"auth:user:{token}")
+    if cached is not None:
+        return cached
+
     auth_service = AuthService(db)
     user = await auth_service.verify_access_token(token)
     if not user:
@@ -22,7 +56,29 @@ async def get_current_user(
             detail="Token inválido o expirado",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return user
+    rol = user.rol
+    snapshot = _CachedUser(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        password_hash=user.password_hash,
+        nombre_completo=user.nombre_completo,
+        activo=user.activo,
+        mfa_secret=user.mfa_secret,
+        mfa_enabled=user.mfa_enabled,
+        rol_id=user.rol_id,
+        ultimo_login=user.ultimo_login,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+        rol=_CachedRol(
+            id=rol.id, nombre=rol.nombre, descripcion=rol.descripcion,
+            permisos=list(rol.permisos or []) if rol.permisos else [],
+        ) if rol else None,
+        rol_nombre=getattr(user, "rol_nombre", None) or (rol.nombre if rol else None),
+        permisos=list(rol.permisos or []) if rol and rol.permisos else [],
+    )
+    cache.set(f"auth:user:{token}", snapshot, ttl_seconds=AUTH_USER_TTL)
+    return snapshot
 
 
 async def get_current_active_user(

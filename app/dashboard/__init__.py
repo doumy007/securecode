@@ -3,7 +3,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audits.models import Auditoria, Vulnerabilidad
 from app.projects.models import Proyecto
 from app.auth.models import Usuario
+from app.shared.cache import cache
 from typing import Optional
+
+# TTL del caché del dashboard: los datos solo cambian cuando el worker
+# completa/avanza auditorías (minutos), no en cada página cargada.
+DASH_TTL = 60
 
 
 class DashboardService:
@@ -19,6 +24,11 @@ class DashboardService:
         return rol_id == 1  # admin rol
 
     async def get_kpi(self, user_id: Optional[int] = None) -> dict:
+        key = f"dash:kpi:{user_id or 'all'}"
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+
         # Agregaciones SQL: en lugar de cargar TODAS las auditorías y
         # vulnerabilidades a memoria (se degradaba con el volumen), se cuentan
         # por estado y por severidad directamente en la BD.
@@ -44,7 +54,7 @@ class DashboardService:
         proyectos = (await self.db.execute(select(func.count()).select_from(Proyecto))).scalar()
         usuarios = (await self.db.execute(select(func.count()).select_from(Usuario))).scalar()
 
-        return {
+        result = {
             "total_proyectos": proyectos or 0,
             "total_auditorias": sum(estado_counts.values()),
             "total_vulnerabilidades": int(total_vulns or 0),
@@ -60,8 +70,15 @@ class DashboardService:
                 total_vulns, critical, resolved
             ),
         }
+        cache.set(key, result, ttl_seconds=DASH_TTL)
+        return result
 
     async def get_vulnerability_by_severity(self, user_id: Optional[int] = None) -> dict:
+        key = f"dash:severity:{user_id or 'all'}"
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+
         vuln_query = select(
             func.coalesce(func.sum(case((Vulnerabilidad.cvss_score >= 9.0, 1), else_=0)), 0),
             func.coalesce(func.sum(case((and_(Vulnerabilidad.cvss_score >= 7.0, Vulnerabilidad.cvss_score < 9.0), 1), else_=0)), 0),
@@ -73,7 +90,7 @@ class DashboardService:
         critical, high, medium, low = (await self.db.execute(vuln_query)).one()
 
         counts = [int(critical or 0), int(high or 0), int(medium or 0), int(low or 0)]
-        return {
+        result = {
             "critical": counts[0],
             "high": counts[1],
             "medium": counts[2],
@@ -82,8 +99,15 @@ class DashboardService:
             "series": counts,
             "colors": ["#dc2626", "#f97316", "#eab308", "#6b7280"],
         }
+        cache.set(key, result, ttl_seconds=DASH_TTL)
+        return result
 
     async def get_trends(self, user_id: Optional[int] = None) -> dict:
+        key = f"dash:trends:{user_id or 'all'}"
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+
         # Auditorías y vulnerabilidades agrupadas por día en BD (1 query c/u)
         # en lugar de cargar todas las auditorías + sus vulns a memoria.
         date_col = func.date(Auditoria.created_at)
@@ -112,13 +136,20 @@ class DashboardService:
         audits = [r.c or 0 for r in audit_rows]
         vulnerabilities = [vuln_counts.get(d, 0) for d in dates]
 
-        return {
+        result = {
             "dates": dates,
             "audits": audits,
             "vulnerabilities": vulnerabilities,
         }
+        cache.set(key, result, ttl_seconds=DASH_TTL)
+        return result
 
     async def get_vulnerabilities_by_project(self, user_id: Optional[int] = None) -> list:
+        key = f"dash:byproject:{user_id or 'all'}"
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+
         # Vulnerabilidades por proyecto en una sola agregación SQL (LEFT JOIN
         # para incluir proyectos sin vulnerabilidades con total 0), ordenado
         # de mayor a menor. OJO: el filtro por usuario va dentro de la JOIN,
@@ -140,10 +171,12 @@ class DashboardService:
         if user_id:
             query = query.where(Proyecto.user_id == user_id)
         rows = (await self.db.execute(query)).all()
-        return [
+        result = [
             {"id": r.id, "nombre": r.nombre, "total": int(r.total or 0)}
             for r in rows
         ]
+        cache.set(key, result, ttl_seconds=DASH_TTL)
+        return result
 
     async def get_compliance_radar(self) -> dict:
         return {

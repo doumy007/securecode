@@ -12,6 +12,11 @@ from app.auth.models import Usuario
 from app.config import settings
 from app.shared.validators import sanitize_filename
 from app.exceptions import ValidationException
+from app.shared.cache import cache
+
+# Lista de proyectos con contadores: 30 s de TTL (solo cambia al crear/
+# eliminar/subir código). Invalidad al escribir.
+PROJECTS_LIST_TTL = 30
 
 router = APIRouter()
 
@@ -23,8 +28,14 @@ async def list_projects(
     db: AsyncSession = Depends(get_db),
     current_user: Usuario = Depends(get_current_active_user),
 ):
+    is_admin = current_user.rol.nombre == "admin"
+    cache_key = f"projects:list:{'admin' if is_admin else current_user.id}:{skip}:{limit}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     service = ProjectService(db)
-    if current_user.rol.nombre != "admin":
+    if not is_admin:
         projects_all, files_counts, audit_counts = await service.get_user_projects_with_counts(
             current_user.id, skip, limit
         )
@@ -33,11 +44,13 @@ async def list_projects(
             result.append(
                 _to_response(p, files_counts.get(p.id, 0), audit_counts.get(p.id, 0))
             )
+        cache.set(cache_key, result, ttl_seconds=PROJECTS_LIST_TTL)
         return result
 
     result = []
     for p, n_files, n_audits in await service.get_projects_with_counts(skip, limit):
         result.append(_to_response(p, n_files, n_audits))
+    cache.set(cache_key, result, ttl_seconds=PROJECTS_LIST_TTL)
     return result
 
 
@@ -74,6 +87,7 @@ async def create_project(
         repo_url=data.repo_url,
         repo_tipo=data.repo_tipo,
     )
+    cache.clear_prefix("projects:list:")
     return ProyectoResponse(
         id=project.id,
         nombre=project.nombre,
@@ -130,6 +144,9 @@ async def delete_project(
     service = ProjectService(db)
     await ensure_project_access(db, project_id, current_user)
     await service.delete_project(project_id)
+    cache.clear_prefix("projects:list:")
+    cache.clear_prefix("audits:list:")
+    cache.clear_prefix("dash:")
     project_dir = os.path.join(settings.APP_STORAGE_DIR, f"project_{project_id}")
     if os.path.exists(project_dir):
         shutil.rmtree(project_dir)
@@ -170,6 +187,11 @@ async def upload_project_files(
 
         service = ProjectService(db)
         result = await service.process_upload(project_id, zip_path, project_dir)
+        # Subir código borra/recrea auditorías del proyecto y cambia contadores
+        # de archivos -> invalidar listados cacheados.
+        cache.clear_prefix("projects:list:")
+        cache.clear_prefix("audits:list:")
+        cache.clear_prefix("dash:")
         # El código fuente subido ya está en BD (truncado); el ZIP sobra en
         # disco (privacidad + crecimiento del storage).
         if os.path.exists(zip_path):
@@ -204,3 +226,14 @@ async def get_project_stats(
     service = ProjectService(db)
     await ensure_project_access(db, project_id, current_user)
     return await service.get_project_stats(project_id)
+
+
+@router.get("/{project_id}/audits")
+async def get_project_audits(
+    project_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: Usuario = Depends(get_current_active_user),
+):
+    service = ProjectService(db)
+    await ensure_project_access(db, project_id, current_user)
+    return await service.get_project_audits_with_counts(project_id)

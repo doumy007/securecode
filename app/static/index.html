@@ -249,7 +249,7 @@
       <div class="overflow-hidden" style="min-width:0">
         <h6 class="mb-1 small text-truncate"><i class="bi bi-bug me-1 text-primary"></i>{nombre}</h6>
         <small class="text-secondary text-truncate d-block">Proyecto: <span class="text-light">{proyecto_nombre}</span> &middot; {tipo}</small>
-        {error_msg}
+        {error_msg|raw}
       </div>
       <div class="text-end d-flex align-items-center gap-2 flex-shrink-0">
         <span class="badge bg-{estado_color} small">{estado}</span>

@@ -310,3 +310,30 @@ class ProjectService:
             "total_audits": len(auditorias),
             "latest_audit_status": auditorias[-1].estado if auditorias else None,
         }
+
+    async def get_project_audits_with_counts(self, project_id: int) -> list[dict]:
+        """Auditorías del proyecto con su número de vulnerabilidades, en una
+        sola agregación SQL (1 round-trip a la BD remota, que es lenta)."""
+        from app.audits.models import Auditoria, Vulnerabilidad
+
+        rows = (
+            await self.db.execute(
+                select(Auditoria, func.count(Vulnerabilidad.id).label("cnt"))
+                .outerjoin(Vulnerabilidad, Vulnerabilidad.auditoria_id == Auditoria.id)
+                .where(Auditoria.proyecto_id == project_id)
+                .group_by(Auditoria.id)
+                .order_by(Auditoria.created_at.desc())
+            )
+        ).all()
+        return [
+            {
+                "id": a.id,
+                "nombre": a.nombre or f"Auditoría #{a.id}",
+                "estado": a.estado,
+                "tipo": a.tipo,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+                "completed_at": a.completed_at.isoformat() if a.completed_at else None,
+                "vulnerabilities_count": int(cnt or 0),
+            }
+            for a, cnt in rows
+        ]

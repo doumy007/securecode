@@ -13,6 +13,12 @@ from app.audits.schemas import (
 from app.dependencies import get_current_active_user, require_role, ensure_project_access, ensure_audit_access
 from app.auth.models import Usuario
 from app.ai.analyzer import AIAnalyzer
+from app.shared.cache import cache
+
+# La lista de auditorías se cachea brevemente: cambia con cada avance del
+# worker, pero 8 s de TTL bastan para que la página cargue sin pegarle a la
+# BD remota (lenta) en cada visita. Se invalida al crear/eliminar/resetear.
+AUDITS_LIST_TTL = 8
 
 logger = logging.getLogger("securecode.audit")
 
@@ -36,6 +42,8 @@ async def create_audit(
         git_username=data.git_username,
         git_token=data.git_token,
     )
+    cache.clear_prefix("audits:list:")
+    cache.clear_prefix("dash:")
 
     nombre_proyecto = await service.get_proyecto_nombre(audit.proyecto_id)
     return AuditoriaResponse(
@@ -63,7 +71,12 @@ async def list_audits(
     current_user: Usuario = Depends(get_current_active_user),
 ):
     service = AuditService(db)
-    is_admin = await service.is_admin_role(current_user.id)
+    is_admin = current_user.rol.nombre == "admin"
+    cache_key = f"audits:list:{'admin' if is_admin else current_user.id}:{skip}:{limit}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+
     if is_admin:
         audits = await service.get_all_audits(skip, limit)
     else:
@@ -88,6 +101,7 @@ async def list_audits(
             vulnerabilities_count=vuln_counts.get(a.id, 0),
             proyecto_nombre=proj_names.get(a.proyecto_id),
         ))
+    cache.set(cache_key, result, ttl_seconds=AUDITS_LIST_TTL)
     return result
 
 
@@ -97,7 +111,7 @@ async def get_audit_summary(
     current_user: Usuario = Depends(get_current_active_user),
 ):
     service = AuditService(db)
-    is_admin = await service.is_admin_role(current_user.id)
+    is_admin = current_user.rol.nombre == "admin"
     if is_admin:
         return await service.get_audit_summary()
     return await service.get_audit_summary(current_user.id)
@@ -162,6 +176,8 @@ async def reset_stuck_audits(
 ):
     service = AuditService(db)
     count = await service.reset_stuck_audits()
+    cache.clear_prefix("audits:list:")
+    cache.clear_prefix("dash:")
     return {"message": f"{count} auditorías atascadas reseteadas a fallida", "count": count}
 
 
@@ -176,6 +192,8 @@ async def delete_audit(
     audit = await service.get_audit(audit_id)
     await db.delete(audit)
     await db.commit()
+    cache.clear_prefix("audits:list:")
+    cache.clear_prefix("dash:")
 
 
 @router.get("/{audit_id}/vulnerabilities", response_model=List[VulnerabilidadResponse])
