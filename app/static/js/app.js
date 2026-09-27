@@ -360,8 +360,8 @@ function toggleUploadMode() {
   document.getElementById("upload-git").classList.toggle("d-none", mode !== "git");
 }
 
-async function uploadProject(id) {
-  const input = document.getElementById("upload-input");
+async function uploadProject(id, inputEl) {
+  const input = inputEl || document.getElementById("upload-input");
   if (!input.files.length) return alert("Selecciona un archivo ZIP");
   try {
     const proj = await api("GET", `/projects/${id}`);
@@ -549,23 +549,48 @@ async function showNewAudit() {
       </div>
     `).join("");
   } catch { document.getElementById("framework-checks").innerHTML = ""; }
+  toggleAuditSource();
   new bootstrap.Modal(document.getElementById("audit-modal")).show();
 }
+function toggleAuditSource() {
+  const mode = document.querySelector('input[name="audit-source"]:checked').value;
+  document.getElementById("audit-zip-block").classList.toggle("d-none", mode !== "zip");
+  document.getElementById("audit-git-block").classList.toggle("d-none", mode !== "git");
+}
+
 document.getElementById("audit-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   document.getElementById("audit-alert").classList.add("d-none");
+  const projectId = parseInt(document.getElementById("audit-proyecto").value);
   const checks = document.querySelectorAll(".framework-check:checked");
+  const source = document.querySelector('input[name="audit-source"]:checked').value;
   try {
+    let git_url, git_username, git_token;
+    if (source === "zip") {
+      const ok = await uploadProject(projectId, document.getElementById("audit-zip-input"));
+      if (!ok) return;
+    } else {
+      const url = document.getElementById("audit-git").value.trim();
+      if (!url) {
+        document.getElementById("audit-alert").textContent = "Ingresa la URL del repositorio Git o elige la opción ZIP.";
+        document.getElementById("audit-alert").classList.remove("d-none");
+        return;
+      }
+      git_url = url;
+      git_username = document.getElementById("audit-git-username").value.trim() || undefined;
+      git_token = document.getElementById("audit-git-token").value || undefined;
+    }
     await api("POST", "/audits/", {
-      proyecto_id: parseInt(document.getElementById("audit-proyecto").value),
+      proyecto_id: projectId,
       nombre: document.getElementById("audit-nombre").value || undefined,
-      git_url: document.getElementById("audit-git").value || undefined,
-      git_username: document.getElementById("audit-git-username").value.trim() || undefined,
-      git_token: document.getElementById("audit-git-token").value || undefined,
+      git_url,
+      git_username,
+      git_token,
       frameworks: Array.from(checks).map(c => c.value),
     });
     bootstrap.Modal.getInstance(document.getElementById("audit-modal")).hide();
     document.getElementById("audit-form").reset();
+    toggleAuditSource();
     renderAudits(document.getElementById("page-content"));
   } catch (err) {
     document.getElementById("audit-alert").textContent = err.message;

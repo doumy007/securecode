@@ -133,10 +133,24 @@
         <form id="audit-form">
           <div class="mb-2"><label class="text-secondary small">Proyecto</label>
             <select class="form-select" id="audit-proyecto" required><option value="">Seleccionar...</option></select></div>
+          <div class="mb-2"><label class="text-secondary small">Origen del código</label>
+            <div class="btn-group btn-group-sm w-100" role="group">
+              <input type="radio" class="btn-check" name="audit-source" id="audit-src-zip" value="zip" checked onchange="toggleAuditSource()">
+              <label class="btn btn-outline-secondary" for="audit-src-zip"><i class="bi bi-file-zip me-1"></i>ZIP</label>
+              <input type="radio" class="btn-check" name="audit-source" id="audit-src-git" value="git" onchange="toggleAuditSource()">
+              <label class="btn btn-outline-secondary" for="audit-src-git"><i class="bi bi-git me-1"></i>URL Git</label>
+            </div>
+          </div>
+          <div id="audit-zip-block">
+            <div class="mb-2"><label class="text-secondary small">Archivo ZIP</label><input type="file" class="form-control form-control-sm" accept=".zip" id="audit-zip-input"></div>
+            <div class="small text-secondary mb-2"><i class="bi bi-info-circle me-1"></i>Subir el ZIP reemplaza el código del proyecto y deja sin efecto sus auditorías anteriores.</div>
+          </div>
+          <div id="audit-git-block" class="d-none">
+            <div class="mb-2"><label class="text-secondary small">URL Git</label><input class="form-control" id="audit-git" placeholder="https://github.com/usuario/repo.git"></div>
+            <div class="mb-2"><label class="text-secondary small">Email (Git)</label><input class="form-control" id="audit-git-username" placeholder="email@ejemplo.com"></div>
+            <div class="mb-2"><label class="text-secondary small">Token / Contraseña</label><input type="password" class="form-control" id="audit-git-token" placeholder="ghp_xxxx o contraseña"></div>
+          </div>
           <div class="mb-2"><label class="text-secondary small">Nombre</label><input class="form-control" id="audit-nombre" placeholder="Auditoría automatizada"></div>
-          <div class="mb-2"><label class="text-secondary small">URL Git</label><input class="form-control" id="audit-git" placeholder="https://github.com/usuario/repo.git"></div>
-          <div class="mb-2"><label class="text-secondary small">Email (Git)</label><input class="form-control" id="audit-git-username" placeholder="email@ejemplo.com"></div>
-          <div class="mb-2"><label class="text-secondary small">Token / Contraseña</label><input type="password" class="form-control" id="audit-git-token" placeholder="ghp_xxxx o contraseña"></div>
           <div class="mb-2">
             <label class="text-secondary small d-block mb-1">Frameworks</label>
             <div id="framework-checks" class="d-flex flex-wrap gap-2"></div>
