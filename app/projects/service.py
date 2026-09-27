@@ -49,6 +49,7 @@ async def bulk_insert_files(db, files, proyecto_id, auditoria_id=None):
         "(proyecto_id, auditoria_id, ruta, hash, tamano, lenguaje, contenido) VALUES "
     )
     aid_sql = "NULL" if auditoria_id is None else str(int(auditoria_id))
+    conn = await db.connection()
     for chunk in chunk_for_insert(files):
         values = ",".join(
             f"({proyecto_id}, {aid_sql}, {sql_quote(f.ruta)}, {sql_quote(f.hash)}, "
@@ -56,7 +57,10 @@ async def bulk_insert_files(db, files, proyecto_id, auditoria_id=None):
             f"{sql_quote(f.contenido)})"
             for f in chunk
         )
-        await db.execute(text(INSERT_SQL + values))
+        # exec_driver_sql: el texto va crudo a MySQL, SIN el parser de text()
+        # que interpreta ':palabra' del contenido como bind parameter
+        # (fallo: "A value is required for bind parameter 'help'").
+        await conn.exec_driver_sql(INSERT_SQL + values)
 
 
 class ProjectService:
