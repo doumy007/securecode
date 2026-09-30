@@ -73,14 +73,32 @@ class AuditOrchestrator:
             "message": message,
             "vulnerabilities_found": vulns_found,
         }
-        audit.resultado_resumen = {"progress": progress}
+        # MERGE sobre el estado actual: la API guarda los informes por framework
+        # en resultado_resumen.reports mientras la auditoría avanza; si aquí se
+        # reemplazara todo, se perderían (clásico "aparece y luego error").
+        row = (
+            await self.db.execute(
+                text("SELECT resultado_resumen FROM sc_auditorias WHERE id = :id"),
+                {"id": audit.id},
+            )
+        ).scalar()
+        existing = {}
+        if isinstance(row, str):
+            try:
+                existing = json.loads(row)
+            except Exception:
+                existing = {}
+        elif isinstance(row, dict):
+            existing = row
+        existing["progress"] = progress
+        audit.resultado_resumen = existing
         await self.db.execute(
             text(
                 "UPDATE sc_auditorias SET resultado_resumen = :val, updated_at = :ts "
                 "WHERE id = :id"
             ),
             {
-                "val": json.dumps(audit.resultado_resumen),
+                "val": json.dumps(existing),
                 "id": audit.id,
                 "ts": datetime.datetime.utcnow(),
             },
@@ -381,8 +399,24 @@ class AuditOrchestrator:
 
             audit.estado = "completada"
             audit.completed_at = datetime.datetime.utcnow()
-            audit.resultado_resumen = {
-                "reports": {},
+            # MERGE: conservar informes por framework ya generados (la API los
+            # escribe en reports[] mientras la auditoría corre). Antes este
+            # bloque reemplazaba resultado_resumen con "reports": {} y se
+            # perdían.
+            import json
+            raw = audit.resultado_resumen
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except Exception:
+                    raw = {}
+            if not isinstance(raw, dict):
+                raw = {}
+            reports = raw.get("reports")
+            if not isinstance(reports, dict):
+                reports = {}
+            raw.update({
+                "reports": reports,
                 "total_vulnerabilities": len(vulnerabilities),
                 "critical": sum(1 for v in vulnerabilities if v.cvss_score and v.cvss_score >= 9.0),
                 "high": sum(1 for v in vulnerabilities if v.cvss_score and 7.0 <= v.cvss_score < 9.0),
@@ -395,7 +429,8 @@ class AuditOrchestrator:
                     "message": "Auditoría completada",
                     "vulnerabilities_found": len(vulnerabilities),
                 },
-            }
+            })
+            audit.resultado_resumen = raw
             await self.db.commit()
 
             return audit.resultado_resumen
@@ -407,16 +442,29 @@ class AuditOrchestrator:
             except Exception:
                 pass
             audit.estado = "fallida"
-            raw = audit.resultado_resumen if isinstance(audit.resultado_resumen, dict) else {}
-            audit.resultado_resumen = {
+            import json
+            raw = audit.resultado_resumen
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except Exception:
+                    raw = {}
+            if not isinstance(raw, dict):
+                raw = {}
+            reports = raw.get("reports")
+            if not isinstance(reports, dict):
+                reports = {}
+            raw.update({
                 "error": str(e),
+                "reports": reports,
                 "progress": {
-                    "percentage": raw.get("progress", {}).get("percentage", 0) if isinstance(raw, dict) else 0,
-                    "steps": raw.get("progress", {}).get("steps", []) if isinstance(raw, dict) else [],
+                    "percentage": raw.get("progress", {}).get("percentage", 0),
+                    "steps": raw.get("progress", {}).get("steps", []),
                     "message": f"Error: {str(e)}",
                     "vulnerabilities_found": 0,
                 },
-            }
+            })
+            audit.resultado_resumen = raw
             await self.db.commit()
             raise
 

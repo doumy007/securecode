@@ -1,10 +1,14 @@
+import asyncio
+import datetime
 import json
 import logging
+import time
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
-from app.database import get_db
+from app.database import get_db, async_session_factory
+from app.config import settings
 from app.audits.service import AuditService
 from app.audits.schemas import (
     AuditoriaCreate, AuditoriaResponse, VulnerabilidadResponse,
@@ -320,6 +324,123 @@ async def update_vulnerability_status(
     return {"message": "Estado actualizado"}
 
 
+# ---------------------------------------------------------------------------
+# Informes por framework: generación en SEGUNDO PLANO con polling.
+# ---------------------------------------------------------------------------
+# Antes la generación IA corría inline dentro de la petición (24-28 s frente
+# al timeout de 30 s del frontend) y el worker pisaba resultado_resumen con
+# {"reports": {}} al completar la auditoría, PERDIENDO informes ya generados
+# (por eso a veces "aparecía y luego error", o había que apretar dos veces).
+# Ahora:
+#  - si el informe ya está cacheado en resultado_resumen -> respuesta directa;
+#  - si no, se agenda una tarea asíncrona de generación y la petición devuelve
+#    {"status":"pending"} para que el frontend haga polling sin timeouts;
+#  - la tarea guarda con read-modify-write (merge, nunca pisa otras claves) y
+#    hay deduplicación por (audit_id, framework) para no gastar OpenAI 2 veces.
+_report_tasks: dict = {}          # (audit_id, framework) -> asyncio.Task
+_report_tasks_lock = asyncio.Lock()
+_report_failures: dict = {}       # (audit_id, framework) -> timestamp
+
+REPORT_GEN_TIMEOUT_SECONDS = 300.0
+
+
+async def _build_report_findings(db: AsyncSession, audit) -> list:
+    """Prepara los hallazgos (misma forma que la vista del informe) para
+    alimentar el prompt del informe por framework."""
+    vulns = await AuditService(db).get_audit_vulnerabilities(audit.id)
+    findings = []
+    for v in vulns:
+        findings.append({
+            "tipo": v.tipo,
+            "archivo": v.archivo.ruta if v.archivo else None,
+            "linea_inicio": v.linea_inicio,
+            "linea_fin": v.linea_fin,
+            "descripcion": v.descripcion,
+            "severidad": v.severidad,
+            "cvss_score": v.cvss_score,
+            "codigo_vulnerable": v.codigo_vulnerable,
+            "codigo_corregido": v.codigo_corregido,
+            "recomendacion": v.recomendacion,
+            "mapeos": [{"estandar": m.estandar, "categoria": m.categoria, "referencia": m.referencia} for m in v.mapeos] if v.mapeos else [],
+        })
+    return findings
+
+
+def _report_is_valid(cached) -> bool:
+    """Un informe cacheado no es válido si contiene el mosaico de error que
+    devuelve el generador cuando OpenAI falla."""
+    return bool(
+        cached
+        and isinstance(cached, dict)
+        and not (cached.get("report_metadata") or {}).get("error")
+    )
+
+
+async def _save_report_merge(db: AsyncSession, audit, framework: str, report: dict):
+    """Guarda el informe haciendo MERGE sobre resultado_resumen: preserva
+    progress, totales y otros informes ya existentes (nunca pisa)."""
+    raw = audit.resultado_resumen
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    reports = raw.get("reports")
+    if not isinstance(reports, dict):
+        reports = {}
+    reports[framework] = report
+    raw["reports"] = reports
+    await db.execute(
+        text("UPDATE sc_auditorias SET resultado_resumen = :val, updated_at = :ts WHERE id = :id"),
+        {"val": json.dumps(raw), "id": audit.id, "ts": datetime.datetime.utcnow()},
+    )
+    await db.commit()
+
+
+async def _generate_report_background(audit_id: int, framework: str):
+    try:
+        async with async_session_factory() as db:
+            service = AuditService(db)
+            audit = await service.get_audit(audit_id)
+            findings = await _build_report_findings(db, audit)
+            project = audit.proyecto
+            ai = AIAnalyzer()
+            try:
+                report = await asyncio.wait_for(
+                    ai.generate_framework_report(
+                        framework,
+                        {"id": audit.id, "fecha": audit.created_at.isoformat() if audit.created_at else ""},
+                        findings,
+                        {"id": project.id, "nombre": project.nombre if project else "—"},
+                    ),
+                    timeout=REPORT_GEN_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"Generación de informe {framework} (audit {audit_id}) excedió {REPORT_GEN_TIMEOUT_SECONDS}s")
+                report = None
+
+            # El generador devuelve un dict con report_metadata.error cuando
+            # OpenAI falla: no lo cacheamos para poder reintentar después.
+            if report is None or (report.get("report_metadata") or {}).get("error"):
+                _report_failures[(audit_id, framework)] = time.time()
+                logger.error(
+                    f"No se pudo generar informe {framework} (audit {audit_id}): "
+                    f"{report and report.get('report_metadata', {}).get('error') or 'sin respuesta'}"
+                )
+                return
+
+            await _save_report_merge(db, audit, framework, report)
+            _report_failures.pop((audit_id, framework), None)
+            logger.info(f"Informe {framework} (audit {audit_id}) generado y cacheado")
+    except Exception as e:
+        logger.exception(f"Error generando informe {framework} (audit {audit_id})")
+        _report_failures[(audit_id, framework)] = time.time()
+    finally:
+        _report_tasks.pop((audit_id, framework), None)
+
+
 @router.get("/{audit_id}/report/{framework}")
 async def get_framework_report(
     audit_id: int,
@@ -345,46 +466,19 @@ async def get_framework_report(
     elif raw is None:
         raw = {}
     reports_cache = raw.get("reports", {}) if isinstance(raw, dict) else {}
-    cached = reports_cache.get(framework)
-    if cached:
+    cached = reports_cache.get(framework) if isinstance(reports_cache, dict) else None
+    if _report_is_valid(cached):
         return cached
 
-    vulns_orm = await service.get_audit_vulnerabilities(audit_id)
-    project = audit.proyecto
-    findings = []
-    for v in vulns_orm:
-        findings.append({
-            "tipo": v.tipo,
-            "archivo": v.archivo.ruta if v.archivo else None,
-            "linea_inicio": v.linea_inicio,
-            "linea_fin": v.linea_fin,
-            "descripcion": v.descripcion,
-            "severidad": v.severidad,
-            "cvss_score": v.cvss_score,
-            "codigo_vulnerable": v.codigo_vulnerable,
-            "codigo_corregido": v.codigo_corregido,
-            "recomendacion": v.recomendacion,
-            "mapeos": [{"estandar": m.estandar, "categoria": m.categoria, "referencia": m.referencia} for m in v.mapeos] if v.mapeos else [],
-        })
-
-    project_info = {
-        "id": project.id,
-        "nombre": project.nombre if project else "—",
-    }
-    audit_info = {
-        "id": audit.id,
-        "fecha": audit.created_at.isoformat() if audit.created_at else "",
-    }
-
-    ai = AIAnalyzer()
-    report = await ai.generate_framework_report(framework, audit_info, findings, project_info)
-
-    raw["reports"] = raw.get("reports", {})
-    raw["reports"][framework] = report
-    await db.execute(
-        text("UPDATE sc_auditorias SET resultado_resumen = :val WHERE id = :id"),
-        {"val": json.dumps(raw), "id": audit.id},
-    )
-    await db.commit()
-
-    return report
+    # Generación en segundo plano (una sola por auditoría+framework).
+    key = (audit_id, framework)
+    async with _report_tasks_lock:
+        if key in _report_tasks:
+            return {"status": "pending", "retry_after_ms": 2000}
+        fail_ts = _report_failures.get(key)
+        if fail_ts and time.time() - fail_ts < 60:
+            # OpenAI caído: recupera por sí solo y no martillear con 2 s.
+            return {"status": "pending", "retry_after_ms": 15000}
+        task = asyncio.create_task(_generate_report_background(audit_id, framework))
+        _report_tasks[key] = task
+    return {"status": "pending", "retry_after_ms": 2000}

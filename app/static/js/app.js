@@ -70,6 +70,7 @@ function loadPage(name) {
 
 function stopPolling() {
   if (_pollInterval) { clearInterval(_pollInterval); _pollInterval = null; }
+  _cancelFwPollers();
 }
 
 // ---------- LOGIN ----------
@@ -861,6 +862,65 @@ async function showAuditReport(auditId) {
 const FW_LABELS = { owasp: "OWASP Top 10 + ASVS", nist_csf: "NIST CSF 2.0", nist_800_82: "NIST SP 800-82", iso_27001: "ISO 27001:2022", cis: "CIS Controls v8", mitre_attck: "MITRE ATT&CK v14" };
 const FW_COLORS = { owasp: "danger", nist_csf: "primary", nist_800_82: "info", iso_27001: "success", cis: "warning", mitre_attck: "dark" };
 
+// --- Polling de informes por framework -------------------------------------
+// El backend genera el informe por IA en SEGUNDO PLANO y devuelve
+// {"status":"pending"}; este helper hace polling con reintentos y deduplica
+// clics repetidos (una sola petición/generación compartida por auditoría+fw).
+let _fwPollers = {}; // key "auditId|fw" -> { active, timer, promise }
+
+function _cancelFwPollers() {
+  for (const k of Object.keys(_fwPollers)) {
+    const p = _fwPollers[k];
+    p.active = false;
+    if (p.timer) clearTimeout(p.timer);
+  }
+  _fwPollers = {};
+}
+
+async function fetchFrameworkReport(auditId, framework) {
+  const key = auditId + "|" + framework;
+  const existing = _fwPollers[key];
+  if (existing && existing.active && existing.promise) return existing.promise;
+
+  const entry = { active: true, timer: null, promise: null };
+  _fwPollers[key] = entry;
+
+  entry.promise = (async () => {
+    let tryNo = 0;
+    for (;;) {
+      if (!entry.active) throw new Error("Solicitud cancelada");
+      tryNo++;
+      let json;
+      try {
+        json = await api("GET", `/audits/${auditId}/report/${framework}`);
+      } catch (err) {
+        if (!entry.active) throw err;
+        if (tryNo >= 6) throw err; // reintentos transitorios (red/timeout/5xx)
+        if (entry.timer) clearTimeout(entry.timer);
+        if (!entry.active) throw new Error("Solicitud cancelada");
+        await new Promise(r => { entry.timer = setTimeout(r, 2000); });
+        continue;
+      }
+      if (json && json.status === "pending") {
+        const ms = (json.retry_after_ms || 2000);
+        if (entry.timer) clearTimeout(entry.timer);
+        if (!entry.active) throw new Error("Solicitud cancelada");
+        await new Promise(r => { entry.timer = setTimeout(r, ms); });
+        continue;
+      }
+      return json; // informe listo o error con instrucciones en report_metadata
+    }
+  })();
+
+  try {
+    return await entry.promise;
+  } finally {
+    entry.active = false;
+    if (entry.timer) clearTimeout(entry.timer);
+    if (_fwPollers[key] === entry) delete _fwPollers[key];
+  }
+}
+
 async function showFrameworkReport(auditId, framework) {
   stopPolling();
   const view = document.getElementById("audit-detail-body");
@@ -868,12 +928,14 @@ async function showFrameworkReport(auditId, framework) {
   document.getElementById("audit-detail-title").textContent = (FW_LABELS[framework] || framework) + " - Auditor\u00eda #" + auditId;
 
   try {
-    const report = await api("GET", `/audits/${auditId}/report/${framework}`);
+    const report = await fetchFrameworkReport(auditId, framework);
     document.getElementById("audit-detail-title").textContent = "Informe " + (FW_LABELS[framework] || framework) + " - Auditor\u00eda #" + auditId;
     const html = renderFrameworkReportContent(report, auditId, framework);
     view.innerHTML = html;
   } catch (err) {
-    view.innerHTML = '<div class="alert alert-danger py-2 small mb-0"><i class="bi bi-exclamation-triangle me-1"></i>Error: ' + err.message + '</div>';
+    if (err && err.message === "Solicitud cancelada") return; // navegó a otra vista
+    const retry = `onclick="showFrameworkReport(${auditId}, '${esc(framework)}')"`;
+    view.innerHTML = `<div class="alert alert-danger py-2 small mb-0"><i class="bi bi-exclamation-triangle me-1"></i>Error: ${escHtml(err.message)} <button class="btn btn-sm btn-outline-danger ms-2" ${retry}>Reintentar</button></div>`;
   }
 }
 
@@ -1087,7 +1149,7 @@ async function downloadFrameworkReportPdf(auditId, framework) {
   }
 
   try {
-    const report = await api("GET", `/audits/${auditId}/report/${framework}`);
+    const report = await fetchFrameworkReport(auditId, framework);
     const meta = report.report_metadata || {};
     const content = renderFrameworkReportContent(report, auditId, framework);
 
