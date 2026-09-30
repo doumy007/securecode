@@ -376,10 +376,23 @@ def _report_is_valid(cached) -> bool:
     )
 
 
-async def _save_report_merge(db: AsyncSession, audit, framework: str, report: dict):
+async def _save_report_merge(db: AsyncSession, audit_id: int, framework: str, report: dict):
     """Guarda el informe haciendo MERGE sobre resultado_resumen: preserva
-    progress, totales y otros informes ya existentes (nunca pisa)."""
-    raw = audit.resultado_resumen
+    progress, totales y otros informes ya existentes (nunca pisa).
+
+    IMPORTANTE: lee el estado ACTUAL desde la BD justo antes de escribir, con
+    SELECT ... FOR UPDATE. La generación con IA tarda decenas de segundos y
+    durante ese rato el worker sigue escribiendo (progress, totales, cierre):
+    guardar un objeto ORM leído al principio de la petición pisaba todo eso
+    (el informe aparecía y luego el resto del resultado se perdía).
+    """
+    row = (
+        await db.execute(
+            text("SELECT resultado_resumen FROM sc_auditorias WHERE id = :id FOR UPDATE"),
+            {"id": audit_id},
+        )
+    ).scalar()
+    raw = row
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
@@ -394,46 +407,55 @@ async def _save_report_merge(db: AsyncSession, audit, framework: str, report: di
     raw["reports"] = reports
     await db.execute(
         text("UPDATE sc_auditorias SET resultado_resumen = :val, updated_at = :ts WHERE id = :id"),
-        {"val": json.dumps(raw), "id": audit.id, "ts": datetime.datetime.utcnow()},
+        {"val": json.dumps(raw), "id": audit_id, "ts": datetime.datetime.utcnow()},
     )
     await db.commit()
 
 
 async def _generate_report_background(audit_id: int, framework: str):
     try:
+        # 1) Recopilar hallazgos en una sesión corta.
         async with async_session_factory() as db:
             service = AuditService(db)
             audit = await service.get_audit(audit_id)
             findings = await _build_report_findings(db, audit)
             project = audit.proyecto
-            ai = AIAnalyzer()
-            try:
-                report = await asyncio.wait_for(
-                    ai.generate_framework_report(
-                        framework,
-                        {"id": audit.id, "fecha": audit.created_at.isoformat() if audit.created_at else ""},
-                        findings,
-                        {"id": project.id, "nombre": project.nombre if project else "—"},
-                    ),
-                    timeout=REPORT_GEN_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                logger.error(f"Generación de informe {framework} (audit {audit_id}) excedió {REPORT_GEN_TIMEOUT_SECONDS}s")
-                report = None
+            audit_info = {
+                "id": audit.id,
+                "fecha": audit.created_at.isoformat() if audit.created_at else "",
+            }
+            project_info = {
+                "id": project.id if project else audit.proyecto_id,
+                "nombre": project.nombre if project else "—",
+            }
+        # 2) Generar con IA SIN sesión abierta: mantener una transacción viva
+        #    durante 20-30 s contra la BD remota solo produce bloqueos.
+        ai = AIAnalyzer()
+        try:
+            report = await asyncio.wait_for(
+                ai.generate_framework_report(framework, audit_info, findings, project_info),
+                timeout=REPORT_GEN_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Generación de informe {framework} (audit {audit_id}) excedió {REPORT_GEN_TIMEOUT_SECONDS}s")
+            report = None
 
-            # El generador devuelve un dict con report_metadata.error cuando
-            # OpenAI falla: no lo cacheamos para poder reintentar después.
-            if report is None or (report.get("report_metadata") or {}).get("error"):
-                _report_failures[(audit_id, framework)] = time.time()
-                logger.error(
-                    f"No se pudo generar informe {framework} (audit {audit_id}): "
-                    f"{report and report.get('report_metadata', {}).get('error') or 'sin respuesta'}"
-                )
-                return
+        # El generador devuelve un dict con report_metadata.error cuando
+        # OpenAI falla: no lo cacheamos para poder reintentar después.
+        if report is None or (report.get("report_metadata") or {}).get("error"):
+            _report_failures[(audit_id, framework)] = time.time()
+            logger.error(
+                f"No se pudo generar informe {framework} (audit {audit_id}): "
+                f"{report and report.get('report_metadata', {}).get('error') or 'sin respuesta'}"
+            )
+            return
 
-            await _save_report_merge(db, audit, framework, report)
-            _report_failures.pop((audit_id, framework), None)
-            logger.info(f"Informe {framework} (audit {audit_id}) generado y cacheado")
+        # 3) Guardar con lectura fresca + lock de fila (no pisa lo que haya
+        #    escrito el worker durante la generación).
+        async with async_session_factory() as db:
+            await _save_report_merge(db, audit_id, framework, report)
+        _report_failures.pop((audit_id, framework), None)
+        logger.info(f"Informe {framework} (audit {audit_id}) generado y cacheado")
     except Exception as e:
         logger.exception(f"Error generando informe {framework} (audit {audit_id})")
         _report_failures[(audit_id, framework)] = time.time()

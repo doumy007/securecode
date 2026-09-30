@@ -76,9 +76,11 @@ class AuditOrchestrator:
         # MERGE sobre el estado actual: la API guarda los informes por framework
         # en resultado_resumen.reports mientras la auditoría avanza; si aquí se
         # reemplazara todo, se perderían (clásico "aparece y luego error").
+        # SELECT ... FOR UPDATE: serializa esta escritura con la de la API para
+        # que ninguna lea un estado viejo y lo pise.
         row = (
             await self.db.execute(
-                text("SELECT resultado_resumen FROM sc_auditorias WHERE id = :id"),
+                text("SELECT resultado_resumen FROM sc_auditorias WHERE id = :id FOR UPDATE"),
                 {"id": audit.id},
             )
         ).scalar()
@@ -400,11 +402,16 @@ class AuditOrchestrator:
             audit.estado = "completada"
             audit.completed_at = datetime.datetime.utcnow()
             # MERGE: conservar informes por framework ya generados (la API los
-            # escribe en reports[] mientras la auditoría corre). Antes este
-            # bloque reemplazaba resultado_resumen con "reports": {} y se
-            # perdían.
+            # escribe en reports[] mientras la auditoría corre). Leer desde BD
+            # para no pisar lo escrito por otras sesiones.
             import json
-            raw = audit.resultado_resumen
+            row = (
+                await self.db.execute(
+                    text("SELECT resultado_resumen FROM sc_auditorias WHERE id = :id FOR UPDATE"),
+                    {"id": audit.id},
+                )
+            ).scalar()
+            raw = row
             if isinstance(raw, str):
                 try:
                     raw = json.loads(raw)
@@ -431,6 +438,10 @@ class AuditOrchestrator:
                 },
             })
             audit.resultado_resumen = raw
+            await self.db.execute(
+                text("UPDATE sc_auditorias SET resultado_resumen = :val, updated_at = :ts WHERE id = :id"),
+                {"val": json.dumps(raw), "id": audit.id, "ts": datetime.datetime.utcnow()},
+            )
             await self.db.commit()
 
             return audit.resultado_resumen
@@ -443,7 +454,13 @@ class AuditOrchestrator:
                 pass
             audit.estado = "fallida"
             import json
-            raw = audit.resultado_resumen
+            row = (
+                await self.db.execute(
+                    text("SELECT resultado_resumen FROM sc_auditorias WHERE id = :id FOR UPDATE"),
+                    {"id": audit.id},
+                )
+            ).scalar()
+            raw = row
             if isinstance(raw, str):
                 try:
                     raw = json.loads(raw)
