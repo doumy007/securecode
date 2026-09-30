@@ -887,6 +887,7 @@ async function fetchFrameworkReport(auditId, framework) {
 
   entry.promise = (async () => {
     let tryNo = 0;
+    const startedAt = Date.now();
     for (;;) {
       if (!entry.active) throw new Error("Solicitud cancelada");
       tryNo++;
@@ -902,6 +903,11 @@ async function fetchFrameworkReport(auditId, framework) {
         continue;
       }
       if (json && json.status === "pending") {
+        // Tope total: si OpenAI está caído el backend reintenta con backoff,
+        // pero no dejamos un spinner infinito: a los 5 min damos error.
+        if (Date.now() - startedAt > 300000) {
+          throw new Error("El informe tardó demasiado en generarse. Inténtalo de nuevo.");
+        }
         const ms = (json.retry_after_ms || 2000);
         if (entry.timer) clearTimeout(entry.timer);
         if (!entry.active) throw new Error("Solicitud cancelada");
